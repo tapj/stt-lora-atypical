@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Local STT LoRA</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Local Speech-to-Text (LoRA)</h1>
+
+      <div class="row">
+        <label>Adapter dir</label>
+        <input id="adapterDir" type="text" value="outputs/run1/best" />
+      </div>
+
+      <div class="row">
+        <label>Device</label>
+        <select id="device">
+          <option value="">auto</option>
+          <option value="cpu">cpu</option>
+          <option value="cuda">cuda</option>
+        </select>
+
+        <label>Language</label>
+        <input id="language" type="text" placeholder="e.g. en, fr (blank = auto)" />
+      </div>
+
+      <div class="row">
+        <label>Beam</label>
+        <input id="beam" type="number" value="5" min="1" max="10" />
+        <label>Temp</label>
+        <input id="temp" type="number" value="0.0" step="0.1" min="0" max="1" />
+      </div>
+
+      <div class="row">
+        <button id="recordBtn">Record</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="transcribeBtn" disabled>Transcribe</button>
+        <button id="copyBtn" disabled>Copy</button>
+        <button id="saveBtn" disabled>Save transcript</button>
+      </div>
+
+      <div class="row">
+        <div id="status">Idle</div>
+      </div>
+
+      <textarea id="output" rows="12" placeholder="Transcript appears here..."></textarea>
+    </div>
+
+    <script src="/static/main.js"></script>
+  </body>
+</html>
