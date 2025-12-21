@@ -1,0 +1,77 @@
+seed: 1337
+output_dir: outputs/run1
+
+data:
+  # One of:
+  # - manifest_csv: path/to/manifest.csv
+  # - pairs_dir: path/to/folder_with_wav_and_txt
+  manifest_csv: data/example_manifest.csv
+  pairs_dir: null
+
+  audio_column: path
+  text_column: transcript
+  language_column: language   # optional, can be empty strings
+  speaker_column: speaker     # optional
+  val_split: 0.1
+  max_audio_seconds: 20
+  num_workers: 4
+  normalize_loudness: false
+  augment:
+    enabled: true
+    noise_mix_prob: 0.15
+    time_stretch_prob: 0.10
+    pitch_shift_prob: 0.05
+    # Conservative ranges
+    time_stretch_min: 0.95
+    time_stretch_max: 1.05
+    pitch_shift_min_semitones: -1.0
+    pitch_shift_max_semitones: 1.0
+
+model:
+  base_model_name: openai/whisper-small
+  language: null            # null means auto
+  task: transcribe
+  forced_decoder_ids: true  # enforce language/task tokens when language set
+  max_label_length: 256
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "v_proj"]  # safe default for Whisper attention
+
+train:
+  batch_size: 8
+  gradient_accumulation_steps: 2
+  learning_rate: 1.0e-4
+  warmup_steps: 200
+  num_train_epochs: 3
+  max_steps: null
+  weight_decay: 0.01
+  logging_steps: 25
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 3
+  mixed_precision: fp16     # "fp16", "bf16", or "no"
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+
+decode:
+  beam_size: 5
+  temperature: 0.0
+  no_repeat_ngram_size: 0
+
+personalization:
+  phrase_list: []           # used as initial_prompt
+  correction_dict: {}       # postprocess replacements, e.g. {"hte": "the"}
+
+live:
+  sample_rate: 16000
+  chunk_ms: 30
+  vad:
+    backend: silero         # "silero" or "energy"
+    silero_threshold: 0.5
+    min_speech_ms: 250
+    min_silence_ms: 500
+    max_utterance_s: 20
