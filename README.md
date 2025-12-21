@@ -15,6 +15,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Windows (Git Bash):
+
+```bash
+python -m venv .venv
+source .venv/Scripts/activate
+pip install -r requirements.txt
+```
+
 GPU (optional):
 
 Install a CUDA-enabled torch build that matches your system if the pinned torch does not.
