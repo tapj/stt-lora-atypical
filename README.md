@@ -39,7 +39,7 @@ Example: data/example_manifest.csv
 Downloadable example (for quick smoke tests, configurable language/dataset):
 
 ```bash
-python data/save_hf_subset_pairs.py --dataset mozilla-foundation/common_voice_22_0 --config fr --split train --n 50 --out_dir data/example_pairs
+python data/save_hf_subset_pairs.py --dataset mozilla-foundation/common_voice_11_0 --config fr --split train --n 50 --out_dir data/example_pairs
 ```
 
 The script pulls a subset from Hugging Face Common Voice (defaults to French) and saves WAV + `.txt` pairs to `data/example_pairs`. Afterward, create a manifest with the provided helper:
