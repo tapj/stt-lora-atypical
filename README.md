@@ -135,12 +135,6 @@ Browser records audio/webm by default. If torchaudio cannot decode webm on your 
 - Install ffmpeg (e.g., `sudo apt-get install ffmpeg`) so torchaudio can decode
   browser-recorded `audio/webm`.
 
-2) Downloading models from the UI
-
-- Use the "Download model" dropdown to pull common Whisper checkpoints or type a custom
-  repo id (e.g., `username/model`). Downloads respect `HF_HOME` / `TRANSFORMERS_CACHE`
-  and optionally `HUGGINGFACE_HUB_TOKEN`.
-
 2) CUDA OOM
 
 - Lower batch_size.
