@@ -152,7 +152,7 @@ async def api_transcribe(
     input_path: Optional[Path] = None
     output_path: Optional[Path] = None
     try:
-        if not isinstance(upload, UploadFile):
+        if not hasattr(upload, "read"):
             raise TypeError(f"Unsupported audio type: {type(upload)}")
 
         audio_bytes = await upload.read()
