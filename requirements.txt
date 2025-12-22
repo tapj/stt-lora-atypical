@@ -17,3 +17,5 @@ uvicorn==0.30.6
 jinja2==3.1.4
 python-multipart==0.0.9
 python-dotenv==1.0.1
+
+# System dependency for decoding browser-recorded audio/webm: ffmpeg

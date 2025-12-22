@@ -132,7 +132,8 @@ Browser records audio/webm by default. If torchaudio cannot decode webm on your 
 
 - Use file mode (wav/flac/mp3) as primary.
 - Or switch to a desktop UI.
-- Or install ffmpeg and ensure torchaudio has backend support.
+- Install ffmpeg (e.g., `sudo apt-get install ffmpeg`) so torchaudio can decode
+  browser-recorded `audio/webm`.
 
 2) CUDA OOM
 
