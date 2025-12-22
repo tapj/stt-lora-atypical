@@ -12,7 +12,14 @@ from starlette.requests import Request
 if "dotenv" not in sys.modules:
     sys.modules["dotenv"] = types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None)
 
-from app.app import DEFAULT_ADAPTER_DIR, api_transcribe, get_service, index
+from app.app import (
+    DEFAULT_ADAPTER_DIR,
+    api_download_model,
+    api_transcribe,
+    get_service,
+    guess_audio_format,
+    index,
+)
 
 
 class DummyService:
@@ -42,8 +49,8 @@ def dummy_service(monkeypatch):
         _ = (adapter_dir, config_path, device)
         return dummy
 
-    def fake_loader(data: bytes):
-        _ = data
+    def fake_loader(data: bytes, fmt=None):
+        _ = (data, fmt)
         return np.zeros(16000, dtype=np.float32)
 
     monkeypatch.setattr("app.app.get_service", fake_get_service)
@@ -91,3 +98,29 @@ def test_get_service_singleton(monkeypatch):
     svc1 = get_service("dir1", "cfg", None)
     svc2 = get_service("dir2", "cfg2", "cpu")
     assert svc1 is svc2
+
+
+def test_guess_audio_format_prefers_content_type():
+    assert guess_audio_format("clip.webm", "audio/webm;codecs=opus") == "webm"
+    assert guess_audio_format("clip.wav", None) == "wav"
+    assert guess_audio_format("clip", None) is None
+
+
+def test_api_download_model(monkeypatch):
+    called = {}
+
+    def fake_snapshot_download(repo_id, cache_dir=None, token=None):
+        called["repo_id"] = repo_id
+        called["cache_dir"] = cache_dir
+        called["token"] = token
+        return "/tmp/fake"
+
+    monkeypatch.setattr("app.app.snapshot_download", fake_snapshot_download)
+
+    import asyncio
+
+    resp = asyncio.get_event_loop().run_until_complete(api_download_model(model_id="openai/whisper-small"))
+    assert resp.status_code == 200
+    data = json.loads(resp.body.decode())
+    assert data["model_id"] == "openai/whisper-small"
+    assert called["repo_id"] == "openai/whisper-small"
