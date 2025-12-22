@@ -13,6 +13,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from huggingface_hub import snapshot_download
 from peft import PeftModel
 from starlette.requests import Request
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
@@ -138,5 +139,18 @@ async def api_transcribe(
         text = svc.transcribe(audio_16k, language=language, beam=beam_size, temperature=temperature)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         return JSONResponse({"timestamp": ts, "text": text})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/download_model")
+async def api_download_model(model_id: str = Form(...)):
+    """
+    Download and cache a HF model. Respects HF_HOME and TRANSFORMERS_CACHE env vars.
+    """
+    try:
+        cache_dir = os.environ.get("TRANSFORMERS_CACHE")
+        snapshot_download(repo_id=model_id, cache_dir=cache_dir, token=os.environ.get("HUGGINGFACE_HUB_TOKEN"))
+        return JSONResponse({"status": "ok", "model_id": model_id})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)

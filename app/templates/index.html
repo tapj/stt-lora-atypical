@@ -46,6 +46,18 @@
       </div>
 
       <textarea id="output" rows="12" placeholder="Transcript appears here..."></textarea>
+
+      <div class="row">
+        <label>Download model</label>
+        <select id="modelSelect">
+          <option value="openai/whisper-small">openai/whisper-small</option>
+          <option value="openai/whisper-medium">openai/whisper-medium</option>
+          <option value="openai/whisper-large-v3">openai/whisper-large-v3</option>
+          <option value="">Custom (enter below)</option>
+        </select>
+        <input id="customModel" type="text" placeholder="custom repo id e.g. username/model" />
+        <button id="downloadModelBtn">Download</button>
+      </div>
     </div>
 
     <script src="/static/main.js"></script>

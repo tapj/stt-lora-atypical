@@ -9,6 +9,9 @@ const copyBtn = document.getElementById("copyBtn");
 const saveBtn = document.getElementById("saveBtn");
 const statusEl = document.getElementById("status");
 const outputEl = document.getElementById("output");
+const downloadModelBtn = document.getElementById("downloadModelBtn");
+const modelSelect = document.getElementById("modelSelect");
+const customModelInput = document.getElementById("customModel");
 
 function setStatus(s) {
   statusEl.textContent = s;
@@ -94,4 +97,30 @@ saveBtn.onclick = () => {
   a.click();
   URL.revokeObjectURL(url);
   setStatus("Saved.");
+};
+
+downloadModelBtn.onclick = async () => {
+  const custom = customModelInput.value.trim();
+  const modelId = custom || modelSelect.value;
+  if (!modelId) {
+    setStatus("Pick a model or enter a custom repo id.");
+    return;
+  }
+
+  setStatus(`Downloading ${modelId}...`);
+  downloadModelBtn.disabled = true;
+
+  const fd = new FormData();
+  fd.append("model_id", modelId);
+
+  const resp = await fetch("/api/download_model", { method: "POST", body: fd });
+  const data = await resp.json();
+
+  if (data.error) {
+    setStatus("Error: " + data.error);
+  } else {
+    setStatus(`Downloaded ${data.model_id} to HF cache.`);
+  }
+
+  downloadModelBtn.disabled = false;
 };
