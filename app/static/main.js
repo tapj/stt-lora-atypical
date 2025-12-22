@@ -86,7 +86,11 @@ stopBtn.onclick = () => {
 
 uploadBtn.onclick = () => {
   wavFileInput.value = "";
-  wavFileInput.click();
+  if (wavFileInput.showPicker) {
+    wavFileInput.showPicker();
+  } else {
+    wavFileInput.click();
+  }
 };
 
 wavFileInput.onchange = async () => {
