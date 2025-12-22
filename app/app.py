@@ -26,9 +26,25 @@ def read_yaml(path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def load_wav_bytes_to_16k_mono(data: bytes) -> np.ndarray:
+def guess_audio_format(filename: Optional[str], content_type: Optional[str]) -> Optional[str]:
+    if content_type:
+        main_type = content_type.split(";", maxsplit=1)[0].strip().lower()
+        if "/" in main_type:
+            subtype = main_type.split("/", maxsplit=1)[1]
+            if subtype:
+                return subtype
+
+    if filename:
+        ext = os.path.splitext(filename)[1].lower().lstrip(".")
+        if ext:
+            return ext
+
+    return None
+
+
+def load_wav_bytes_to_16k_mono(data: bytes, fmt: Optional[str] = None) -> np.ndarray:
     bio = io.BytesIO(data)
-    wav, sr = torchaudio.load(bio)
+    wav, sr = torchaudio.load(bio, format=fmt)
     if wav.shape[0] > 1:
         wav = torch.mean(wav, dim=0, keepdim=True)
     if sr != 16000:
@@ -116,7 +132,8 @@ async def api_transcribe(
 ):
     try:
         data = await audio.read()
-        audio_16k = load_wav_bytes_to_16k_mono(data)
+        fmt = guess_audio_format(audio.filename, audio.content_type)
+        audio_16k = load_wav_bytes_to_16k_mono(data, fmt=fmt)
         svc = get_service(adapter_dir=adapter_dir, config_path=config_path, device=device)
         text = svc.transcribe(audio_16k, language=language, beam=beam_size, temperature=temperature)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
