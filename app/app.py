@@ -1,3 +1,4 @@
+import io  # Needed for BytesIO when loading WAV from bytes
 import json
 import os
 import subprocess
