@@ -2,6 +2,8 @@ import io
 import json
 import sys
 import types
+import wave
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -42,12 +44,23 @@ def dummy_service(monkeypatch):
         _ = (adapter_dir, config_path, device)
         return dummy
 
-    def fake_loader(data: bytes, fmt=None):
-        _ = (data, fmt)
+    def fake_loader(path: Path):
+        _ = path
         return np.zeros(16000, dtype=np.float32)
 
+    def fake_run(cmd, check, env=None, stdout=None, stderr=None):
+        _ = (check, env, stdout, stderr)
+        output_path = Path(cmd[-1])
+        with wave.open(str(output_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(np.zeros(1600, dtype=np.int16).tobytes())
+        return types.SimpleNamespace(returncode=0)
+
     monkeypatch.setattr("app.app.get_service", fake_get_service)
-    monkeypatch.setattr("app.app.load_wav_bytes_to_16k_mono", fake_loader)
+    monkeypatch.setattr("app.app.load_wav_file_to_mono_16k", fake_loader)
+    monkeypatch.setattr("app.app.subprocess.run", fake_run)
     return dummy
 
 
@@ -66,6 +79,60 @@ def test_api_transcribe_success(dummy_service):
     resp = asyncio.get_event_loop().run_until_complete(
         api_transcribe(
             audio=upload,
+            adapter_dir="adapter",
+            config_path="config.yaml",
+            device=None,
+            language=None,
+            beam_size=5,
+            temperature=0.0,
+        )
+    )
+    assert resp.status_code == 200
+    parsed = json.loads(resp.body.decode())
+    assert parsed["text"] == "dummy text"
+    assert "timestamp" in parsed
+
+
+def test_api_transcribe_accepts_path(dummy_service, tmp_path):
+    wav_file = tmp_path / "clip.wav"
+    with wave.open(str(wav_file), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(np.zeros(1600, dtype=np.int16).tobytes())
+
+    import asyncio
+
+    resp = asyncio.get_event_loop().run_until_complete(
+        api_transcribe(
+            audio=wav_file,
+            adapter_dir="adapter",
+            config_path="config.yaml",
+            device=None,
+            language=None,
+            beam_size=5,
+            temperature=0.0,
+        )
+    )
+    assert resp.status_code == 200
+    parsed = json.loads(resp.body.decode())
+    assert parsed["text"] == "dummy text"
+    assert "timestamp" in parsed
+
+
+def test_api_transcribe_accepts_str_path(dummy_service, tmp_path):
+    wav_file = tmp_path / "clip.wav"
+    with wave.open(str(wav_file), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(np.zeros(1600, dtype=np.int16).tobytes())
+
+    import asyncio
+
+    resp = asyncio.get_event_loop().run_until_complete(
+        api_transcribe(
+            audio=str(wav_file),
             adapter_dir="adapter",
             config_path="config.yaml",
             device=None,
