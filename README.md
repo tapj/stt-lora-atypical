@@ -23,6 +23,18 @@ source .venv/Scripts/activate
 pip install -r requirements.txt
 ```
 
+Environment variables
+
+Copy `.env.example` to `.env` and adjust as needed:
+
+```bash
+cp .env.example .env
+```
+
+- `STT_CONFIG_PATH` points to the YAML config used by the app (defaults to `config.yaml`).
+- `STT_ADAPTER_DIR` sets the default adapter directory shown in the web UI (defaults to `outputs/run1/best`).
+- `HUGGINGFACE_HUB_TOKEN` is optional and used when downloading gated models (e.g., Whisper checkpoints hosted on Hugging Face). The app uses `openai/whisper-small` by default and does **not** require an OpenAI API key.
+
 GPU (optional):
 
 Install a CUDA-enabled torch build that matches your system if the pinned torch does not.

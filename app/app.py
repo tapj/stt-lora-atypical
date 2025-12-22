@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torchaudio
 import yaml
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -82,6 +83,11 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 # Lazy init on first request
 SERVICE: Optional[STTService] = None
 
+# Load environment variables for config paths, adapter directory, and any API tokens (e.g., HUGGINGFACE_HUB_TOKEN)
+load_dotenv()
+DEFAULT_CONFIG_PATH = os.getenv("STT_CONFIG_PATH", "config.yaml")
+DEFAULT_ADAPTER_DIR = os.getenv("STT_ADAPTER_DIR", "outputs/run1/best")
+
 
 def get_service(adapter_dir: str, config_path: str, device: Optional[str]) -> STTService:
     global SERVICE
@@ -92,14 +98,17 @@ def get_service(adapter_dir: str, config_path: str, device: Optional[str]) -> ST
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "adapter_dir_default": DEFAULT_ADAPTER_DIR},
+    )
 
 
 @app.post("/api/transcribe")
 async def api_transcribe(
     audio: UploadFile = File(...),
     adapter_dir: str = Form(...),
-    config_path: str = Form("config.yaml"),
+    config_path: str = Form(DEFAULT_CONFIG_PATH),
     device: Optional[str] = Form(None),  # "cpu" or "cuda"
     language: Optional[str] = Form(None),
     beam_size: int = Form(5),
