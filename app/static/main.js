@@ -4,6 +4,8 @@ let lastTranscript = "";
 
 const recordBtn = document.getElementById("recordBtn");
 const stopBtn = document.getElementById("stopBtn");
+const uploadBtn = document.getElementById("uploadBtn");
+const uploadInput = document.getElementById("uploadInput");
 const transcribeBtn = document.getElementById("transcribeBtn");
 const copyBtn = document.getElementById("copyBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -44,17 +46,38 @@ stopBtn.onclick = () => {
   transcribeBtn.disabled = false;
 };
 
+uploadBtn.onclick = () => {
+  uploadInput.click();
+};
+
+uploadInput.onchange = () => {
+  const file = uploadInput.files && uploadInput.files[0];
+  if (!file) return;
+  chunks = [file];
+  lastTranscript = "";
+  outputEl.value = "";
+  transcribeBtn.disabled = false;
+  copyBtn.disabled = true;
+  saveBtn.disabled = true;
+  recordBtn.disabled = false;
+  stopBtn.disabled = true;
+  setStatus(`Loaded file: ${file.name}. Click Transcribe.`);
+};
+
 transcribeBtn.onclick = async () => {
   setStatus("Transcribing...");
   transcribeBtn.disabled = true;
 
-  const blob = new Blob(chunks, { type: "audio/webm" });
+  const source = chunks.length ? chunks[0] : null;
+  const mimeType = source && source.type ? source.type : "audio/webm";
+  const blob = new Blob(chunks, { type: mimeType || "application/octet-stream" });
   const arrayBuffer = await blob.arrayBuffer();
 
   // Backend expects wav bytes. Browser gives webm/opus. We send as-is and rely on torchaudio decode.
   // If torchaudio backend cannot decode webm on your system, switch MediaRecorder mimeType to audio/wav via a polyfill,
   // or record to wav in a desktop app. Troubleshooting in README.
-  const file = new File([arrayBuffer], "audio.webm", { type: "audio/webm" });
+  const filename = source && source.name ? source.name : "audio.webm";
+  const file = new File([arrayBuffer], filename, { type: mimeType || "audio/webm" });
 
   const fd = new FormData();
   fd.append("audio", file);
