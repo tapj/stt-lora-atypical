@@ -137,56 +137,45 @@ async def api_transcribe(
 ):
     input_path: Optional[Path] = None
     output_path: Optional[Path] = None
-    wav_path: Optional[Path] = None
     try:
-        if isinstance(audio, UploadFile):
-            data = await audio.read()
-            suffix = Path(audio.filename).suffix if audio.filename else ".webm"
-            if not suffix:
-                suffix = ".webm"
+        data = await audio.read()
+        suffix = Path(audio.filename).suffix if audio.filename else ".webm"
+        if not suffix:
+            suffix = ".webm"
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
-                src.write(data)
-                input_path = Path(src.name)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
+            src.write(data)
+            input_path = Path(src.name)
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
-                output_path = Path(dst.name)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+            output_path = Path(dst.name)
 
-            env = os.environ.copy()
-            env["PATH"] = f"bin{os.pathsep}" + env.get("PATH", "")
+        env = os.environ.copy()
+        env["PATH"] = f"./bin{os.pathsep}" + env.get("PATH", "")
 
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(input_path),
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-f",
-                "wav",
-                "-acodec",
-                "pcm_s16le",
-                str(output_path),
-            ]
-            try:
-                subprocess.run(ffmpeg_cmd, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            except FileNotFoundError as exc:
-                raise FileNotFoundError("ffmpeg not found in PATH; install a static build into ./bin") from exc
-            except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else ""
-                raise RuntimeError(f"ffmpeg failed: {stderr.strip()}") from exc
-            wav_path = output_path
-        elif isinstance(audio, (str, Path)):
-            wav_path = Path(audio)
-        else:
-            raise TypeError(f"Unsupported audio type: {type(audio)}")
-
-        if wav_path is None:
-            raise RuntimeError("No audio path available for transcription")
-
-        audio_16k = load_wav_file_to_mono_16k(wav_path)
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "wav",
+            "-acodec",
+            "pcm_s16le",
+            str(output_path),
+        ]
+        try:
+            subprocess.run(ffmpeg_cmd, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError("ffmpeg not found in PATH; install a static build into ./bin") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else ""
+            raise RuntimeError(f"ffmpeg failed: {stderr.strip()}") from exc
+        audio_16k = load_wav_file_to_mono_16k(output_path)
         svc = get_service(adapter_dir=adapter_dir, config_path=config_path, device=device)
         text = svc.transcribe(audio_16k, language=language, beam=beam_size, temperature=temperature)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
