@@ -67,19 +67,9 @@ def test_main_saves_subset(tmp_path, monkeypatch):
 
     monkeypatch.setattr("data.save_hf_subset_pairs.try_load", fake_try_load)
 
-    # Force a stub soundfile module for this test, even if real soundfile is installed.
-    written = []
-    def _stub_write(path, data, samplerate):
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.touch()
-        written.append((str(p), data, samplerate))
-
-    stub_sf = types.SimpleNamespace(written=written, write=_stub_write, __libsndfile_version__="0.0.0")
-    monkeypatch.setitem(sys.modules, "soundfile", stub_sf)
-    # Ensure the module under test uses the stubbed handle.
-    monkeypatch.setattr("data.save_hf_subset_pairs.sf", stub_sf, raising=False)
-    stub_sf.written.clear()
+    # Capture written files via the stubbed soundfile module.
+    dummy_sf = sys.modules["soundfile"]
+    dummy_sf.written.clear()
 
     out_dir = tmp_path / "pairs"
     argv = ["prog", "--dataset", "dummy", "--config", "xx", "--split", "train", "--n", "2", "--out_dir", str(out_dir)]
@@ -96,4 +86,4 @@ def test_main_saves_subset(tmp_path, monkeypatch):
     assert txt_files[1].read_text(encoding="utf-8") == "second"
 
     # Ensure stubbed soundfile.write was invoked with expected sampling rate.
-    assert written[0][2] == 16000
+    assert dummy_sf.written[0][2] == 16000
