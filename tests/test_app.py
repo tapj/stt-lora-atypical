@@ -120,6 +120,33 @@ def test_api_transcribe_accepts_path(dummy_service, tmp_path):
     assert "timestamp" in parsed
 
 
+def test_api_transcribe_accepts_str_path(dummy_service, tmp_path):
+    wav_file = tmp_path / "clip.wav"
+    with wave.open(str(wav_file), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(np.zeros(1600, dtype=np.int16).tobytes())
+
+    import asyncio
+
+    resp = asyncio.get_event_loop().run_until_complete(
+        api_transcribe(
+            audio=str(wav_file),
+            adapter_dir="adapter",
+            config_path="config.yaml",
+            device=None,
+            language=None,
+            beam_size=5,
+            temperature=0.0,
+        )
+    )
+    assert resp.status_code == 200
+    parsed = json.loads(resp.body.decode())
+    assert parsed["text"] == "dummy text"
+    assert "timestamp" in parsed
+
+
 def test_get_service_singleton(monkeypatch):
     dummy = DummyService()
 
