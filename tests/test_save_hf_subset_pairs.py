@@ -67,21 +67,9 @@ def test_main_saves_subset(tmp_path, monkeypatch):
 
     monkeypatch.setattr("data.save_hf_subset_pairs.try_load", fake_try_load)
 
-    # Capture writes, regardless of whether a real soundfile module is installed.
-    dummy_sf = sys.modules.get("soundfile")
-    if dummy_sf is not None and not hasattr(dummy_sf, "written"):
-        dummy_sf.written = []
-    if dummy_sf is not None and hasattr(dummy_sf, "written"):
-        dummy_sf.written.clear()
-
-    def fake_write(path, data, sr):
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.touch()
-        if dummy_sf is not None and hasattr(dummy_sf, "written"):
-            dummy_sf.written.append((p, data, sr))
-
-    monkeypatch.setattr("soundfile.write", fake_write)
+    # Capture written files via the stubbed soundfile module.
+    dummy_sf = sys.modules["soundfile"]
+    dummy_sf.written.clear()
 
     out_dir = tmp_path / "pairs"
     argv = ["prog", "--dataset", "dummy", "--config", "xx", "--split", "train", "--n", "2", "--out_dir", str(out_dir)]
