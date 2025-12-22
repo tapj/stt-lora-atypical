@@ -5,7 +5,7 @@ let lastTranscript = "";
 const recordBtn = document.getElementById("recordBtn");
 const stopBtn = document.getElementById("stopBtn");
 const uploadBtn = document.getElementById("uploadBtn");
-const uploadInput = document.getElementById("uploadInput");
+const wavFileInput = document.getElementById("wavFile");
 const transcribeBtn = document.getElementById("transcribeBtn");
 const copyBtn = document.getElementById("copyBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -17,6 +17,44 @@ const customModelInput = document.getElementById("customModel");
 
 function setStatus(s) {
   statusEl.textContent = s;
+}
+
+function buildFormData(file) {
+  const fd = new FormData();
+  fd.append("audio", file, file.name || "audio.wav");
+  fd.append("adapter_dir", document.getElementById("adapterDir").value);
+  fd.append("device", document.getElementById("device").value);
+  fd.append("language", document.getElementById("language").value);
+  fd.append("beam_size", document.getElementById("beam").value);
+  fd.append("temperature", document.getElementById("temp").value);
+  return fd;
+}
+
+async function transcribeFile(file, message) {
+  transcribeBtn.disabled = true;
+  uploadBtn.disabled = true;
+  setStatus(message);
+
+  try {
+    const resp = await fetch("/api/transcribe", { method: "POST", body: buildFormData(file) });
+    const data = await resp.json();
+
+    if (data.error) {
+      setStatus("Error: " + data.error);
+      return;
+    }
+
+    lastTranscript = `[${data.timestamp}] ${data.text}`;
+    outputEl.value = lastTranscript;
+    setStatus("Done.");
+    copyBtn.disabled = false;
+    saveBtn.disabled = false;
+  } catch (err) {
+    setStatus("Error: " + err.message);
+  } finally {
+    transcribeBtn.disabled = false;
+    uploadBtn.disabled = false;
+  }
 }
 
 recordBtn.onclick = async () => {
@@ -47,25 +85,29 @@ stopBtn.onclick = () => {
 };
 
 uploadBtn.onclick = () => {
-  uploadInput.click();
+  wavFileInput.value = "";
+  wavFileInput.click();
 };
 
-uploadInput.onchange = () => {
-  const file = uploadInput.files && uploadInput.files[0];
+wavFileInput.onchange = async () => {
+  const file = wavFileInput.files && wavFileInput.files[0];
   if (!file) return;
-  chunks = [file];
   lastTranscript = "";
   outputEl.value = "";
-  transcribeBtn.disabled = false;
-  copyBtn.disabled = true;
-  saveBtn.disabled = true;
   recordBtn.disabled = false;
   stopBtn.disabled = true;
-  setStatus(`Loaded file: ${file.name}. Click Transcribe.`);
+  copyBtn.disabled = true;
+  saveBtn.disabled = true;
+  await transcribeFile(file, `Transcribing ${file.name}...`);
 };
 
 transcribeBtn.onclick = async () => {
-  setStatus("Transcribing...");
+  if (!chunks.length) {
+    setStatus("Record something first.");
+    return;
+  }
+
+  setStatus("Transcribing mic recording...");
   transcribeBtn.disabled = true;
 
   const source = chunks.length ? chunks[0] : null;
@@ -73,36 +115,10 @@ transcribeBtn.onclick = async () => {
   const blob = new Blob(chunks, { type: mimeType || "application/octet-stream" });
   const arrayBuffer = await blob.arrayBuffer();
 
-  // Backend expects wav bytes. Browser gives webm/opus. We send as-is and rely on torchaudio decode.
-  // If torchaudio backend cannot decode webm on your system, switch MediaRecorder mimeType to audio/wav via a polyfill,
-  // or record to wav in a desktop app. Troubleshooting in README.
   const filename = source && source.name ? source.name : "audio.webm";
   const file = new File([arrayBuffer], filename, { type: mimeType || "audio/webm" });
 
-  const fd = new FormData();
-  fd.append("audio", file);
-  fd.append("adapter_dir", document.getElementById("adapterDir").value);
-  fd.append("device", document.getElementById("device").value);
-  fd.append("language", document.getElementById("language").value);
-  fd.append("beam_size", document.getElementById("beam").value);
-  fd.append("temperature", document.getElementById("temp").value);
-
-  const resp = await fetch("/api/transcribe", { method: "POST", body: fd });
-  const data = await resp.json();
-
-  if (data.error) {
-    setStatus("Error: " + data.error);
-    transcribeBtn.disabled = false;
-    return;
-  }
-
-  lastTranscript = `[${data.timestamp}] ${data.text}`;
-  outputEl.value = lastTranscript;
-  setStatus("Done.");
-
-  copyBtn.disabled = false;
-  saveBtn.disabled = false;
-  transcribeBtn.disabled = false;
+  await transcribeFile(file, "Transcribing mic recording...");
 };
 
 copyBtn.onclick = async () => {

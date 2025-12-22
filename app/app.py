@@ -58,6 +58,19 @@ def load_wav_file_to_mono_16k(path: Path) -> np.ndarray:
     return wav
 
 
+def load_wav_bytes_to_mono_16k(data: bytes) -> np.ndarray:
+    with wave.open(io.BytesIO(data), "rb") as wf:
+        if wf.getnchannels() != 1:
+            raise ValueError("Expected mono WAV input")
+        if wf.getframerate() != 16000:
+            raise ValueError("Expected 16 kHz WAV input")
+        if wf.getsampwidth() != 2:
+            raise ValueError("Expected 16-bit PCM WAV input")
+        frames = wf.readframes(wf.getnframes())
+    wav = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    return wav
+
+
 class STTService:
     def __init__(self, cfg_path: str, adapter_dir: str, device_str: Optional[str] = None):
         self.cfg = read_yaml(cfg_path)
@@ -135,25 +148,32 @@ async def api_transcribe(
     beam_size: int = Form(5),
     temperature: float = Form(0.0),
 ):
+    upload = audio
     input_path: Optional[Path] = None
     output_path: Optional[Path] = None
-    wav_path: Optional[Path] = None
     try:
-        if isinstance(audio, UploadFile):
-            data = await audio.read()
-            suffix = Path(audio.filename).suffix if audio.filename else ".webm"
+        if not isinstance(upload, UploadFile):
+            raise TypeError(f"Unsupported audio type: {type(upload)}")
+
+        audio_bytes = await upload.read()
+        filename = upload.filename or "audio.webm"
+        suffix = Path(filename).suffix.lower()
+
+        env = os.environ.copy()
+        env["PATH"] = f"bin{os.pathsep}" + env.get("PATH", "")
+
+        if suffix == ".wav":
+            audio_16k = load_wav_bytes_to_mono_16k(audio_bytes)
+        else:
             if not suffix:
                 suffix = ".webm"
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
-                src.write(data)
+                src.write(audio_bytes)
                 input_path = Path(src.name)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
                 output_path = Path(dst.name)
-
-            env = os.environ.copy()
-            env["PATH"] = f"bin{os.pathsep}" + env.get("PATH", "")
 
             ffmpeg_cmd = [
                 "ffmpeg",
@@ -177,16 +197,9 @@ async def api_transcribe(
             except subprocess.CalledProcessError as exc:
                 stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else ""
                 raise RuntimeError(f"ffmpeg failed: {stderr.strip()}") from exc
-            wav_path = output_path
-        elif isinstance(audio, (str, Path)):
-            wav_path = Path(audio)
-        else:
-            raise TypeError(f"Unsupported audio type: {type(audio)}")
 
-        if wav_path is None:
-            raise RuntimeError("No audio path available for transcription")
+            audio_16k = load_wav_file_to_mono_16k(output_path)
 
-        audio_16k = load_wav_file_to_mono_16k(Path(wav_path))
         svc = get_service(adapter_dir=adapter_dir, config_path=config_path, device=device)
         text = svc.transcribe(audio_16k, language=language, beam=beam_size, temperature=temperature)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
