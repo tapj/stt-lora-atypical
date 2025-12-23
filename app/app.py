@@ -198,10 +198,6 @@ async def api_transcribe(
         return JSONResponse({"timestamp": ts, "text": text})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    finally:
-        for path in (input_path, output_path):
-            if path and path.exists():
-                path.unlink()
 
 
 @app.post("/api/download_model")
