@@ -188,6 +188,11 @@ async def all_exception_handler(request: Request, exc: Exception):
     return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.exception_handler(Exception)
+async def all_exception_handler(request: Request, exc: Exception):
+    return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse(
