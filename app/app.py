@@ -1,12 +1,15 @@
-import io
+import io  # Needed for BytesIO when loading WAV from bytes
 import json
 import os
+import subprocess
+import tempfile
 import time
+import wave
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
-import torchaudio
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
@@ -43,15 +46,59 @@ def guess_audio_format(filename: Optional[str], content_type: Optional[str]) -> 
     return None
 
 
-def load_wav_bytes_to_16k_mono(data: bytes, fmt: Optional[str] = None) -> np.ndarray:
-    bio = io.BytesIO(data)
-    wav, sr = torchaudio.load(bio, format=fmt)
-    if wav.shape[0] > 1:
-        wav = torch.mean(wav, dim=0, keepdim=True)
-    if sr != 16000:
-        wav = torchaudio.functional.resample(wav, sr, 16000)
-    wav = wav.squeeze(0)
-    return wav.numpy().astype(np.float32)
+def normalize_to_wav16k_mono(upload_bytes: bytes, filename: str) -> bytes:
+    """
+    Return WAV bytes (mono, 16 kHz, pcm_s16le) by invoking ffmpeg.
+    """
+    suffix = Path(filename or "").suffix.lower() or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
+        src.write(upload_bytes)
+        src_path = src.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+        dst_path = dst.name
+
+    env = os.environ.copy()
+    env["PATH"] = f"bin{os.pathsep}" + env.get("PATH", "")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        src_path,
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-acodec",
+        "pcm_s16le",
+        "-f",
+        "wav",
+        dst_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with open(dst_path, "rb") as f:
+            wav_bytes = f.read()
+        return wav_bytes
+    finally:
+        for p in (src_path, dst_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def load_wav_bytes_to_float32_mono_16k(data: bytes) -> np.ndarray:
+    with wave.open(io.BytesIO(data), "rb") as wf:
+        if wf.getnchannels() != 1:
+            raise ValueError("Expected mono WAV input")
+        if wf.getframerate() != 16000:
+            raise ValueError("Expected 16 kHz WAV input")
+        if wf.getsampwidth() != 2:
+            raise ValueError("Expected 16-bit PCM WAV input")
+        frames = wf.readframes(wf.getnframes())
+    wav = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    return wav
 
 
 class STTService:
@@ -131,10 +178,16 @@ async def api_transcribe(
     beam_size: int = Form(5),
     temperature: float = Form(0.0),
 ):
+    upload = audio
     try:
-        data = await audio.read()
-        fmt = guess_audio_format(audio.filename, audio.content_type)
-        audio_16k = load_wav_bytes_to_16k_mono(data, fmt=fmt)
+        if not hasattr(upload, "read"):
+            raise TypeError(f"Unsupported audio type: {type(upload)}")
+
+        audio_bytes = await upload.read()
+        filename = upload.filename or "audio.webm"
+        wav_bytes = normalize_to_wav16k_mono(audio_bytes, filename)
+        audio_16k = load_wav_bytes_to_float32_mono_16k(wav_bytes)
+
         svc = get_service(adapter_dir=adapter_dir, config_path=config_path, device=device)
         text = svc.transcribe(audio_16k, language=language, beam=beam_size, temperature=temperature)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -146,10 +199,10 @@ async def api_transcribe(
 @app.post("/api/download_model")
 async def api_download_model(model_id: str = Form(...)):
     """
-    Download and cache a HF model. Respects HF_HOME and TRANSFORMERS_CACHE env vars.
+    Download and cache a HF model. Respects HF_HOME env var.
     """
     try:
-        cache_dir = os.environ.get("TRANSFORMERS_CACHE")
+        cache_dir = os.environ.get("HF_HOME")
         snapshot_download(repo_id=model_id, cache_dir=cache_dir, token=os.environ.get("HUGGINGFACE_HUB_TOKEN"))
         return JSONResponse({"status": "ok", "model_id": model_id})
     except Exception as e:
