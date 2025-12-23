@@ -55,11 +55,17 @@ window.addEventListener("DOMContentLoaded", () => {
 
     try {
       const resp = await fetch("/api/transcribe", { method: "POST", body: buildFormData(file) });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || data.detail || resp.statusText);
+      const ct = resp.headers.get("content-type") || "";
+      const raw = await resp.text();
+      let data = null;
+      if (ct.includes("application/json")) {
+        data = JSON.parse(raw);
+      } else {
+        // fallback: si le backend renvoie du texte (ex: 500 Internal Server Error)
+        data = { error: raw };
       }
-      setTranscript(data.text || "", data.timestamp);
+      if (!resp.ok) throw new Error(data.error || data.detail || raw || resp.statusText);
+      setTranscript(data.text || "");
       setStatus("Done.");
     } catch (err) {
       setStatus("Error: " + err.message);

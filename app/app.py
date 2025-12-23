@@ -12,13 +12,12 @@ import numpy as np
 import torch
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from huggingface_hub import snapshot_download
 from peft import PeftModel
-from starlette.requests import Request
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from src.postprocess import apply_corrections, build_initial_prompt
@@ -160,6 +159,11 @@ def get_service(adapter_dir: str, config_path: str, device: Optional[str]) -> ST
     return SERVICE
 
 
+@app.exception_handler(Exception)
+async def all_exception_handler(request: Request, exc: Exception):
+    return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse(
@@ -194,10 +198,6 @@ async def api_transcribe(
         return JSONResponse({"timestamp": ts, "text": text})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    finally:
-        for path in (input_path, output_path):
-            if path and path.exists():
-                path.unlink()
 
 
 @app.post("/api/download_model")
