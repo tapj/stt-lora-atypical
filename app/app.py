@@ -1,18 +1,21 @@
 import io  # Needed for BytesIO when loading WAV from bytes
+import csv
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
 import wave
+import zipfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, UploadFile, Request
+from fastapi import BackgroundTasks, FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -101,14 +104,23 @@ def load_wav_bytes_to_float32_mono_16k(data: bytes) -> np.ndarray:
 
 
 class STTService:
-    def __init__(self, cfg_path: str, adapter_dir: str, device_str: Optional[str] = None):
+    def __init__(self, cfg_path: str, adapter_dir: Optional[str], device_str: Optional[str] = None):
         self.cfg = read_yaml(cfg_path)
         self.device = torch.device(device_str) if device_str else get_device(prefer_gpu=True)
 
-        self.processor = WhisperProcessor.from_pretrained(adapter_dir)
-        base = self.cfg["model"]["base_model_name"]
-        model = WhisperForConditionalGeneration.from_pretrained(base)
-        self.model = PeftModel.from_pretrained(model, adapter_dir)
+        base_model_name = self.cfg["model"].get("base_model_name", "openai/whisper-small")
+
+        adapter_path = Path(adapter_dir) if adapter_dir else None
+        adapter_exists = adapter_path is not None and adapter_path.exists()
+
+        processor_src = adapter_path if (adapter_exists and (adapter_path / "preprocessor_config.json").exists()) else base_model_name
+        self.processor = WhisperProcessor.from_pretrained(processor_src)
+
+        base_model = WhisperForConditionalGeneration.from_pretrained(base_model_name)
+        if adapter_exists:
+            self.model = PeftModel.from_pretrained(base_model, str(adapter_path))
+        else:
+            self.model = base_model
         self.model.to(self.device).eval()
 
         self.prompt = build_initial_prompt(self.cfg.get("personalization", {}).get("phrase_list", []))
@@ -144,19 +156,36 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 # Lazy init on first request
-SERVICE: Optional[STTService] = None
+SERVICE_CACHE: Dict[str, STTService] = {}
 
 # Load environment variables for config paths, adapter directory, and any API tokens (e.g., HUGGINGFACE_HUB_TOKEN)
 load_dotenv()
 DEFAULT_CONFIG_PATH = os.getenv("STT_CONFIG_PATH", "config.yaml")
 DEFAULT_ADAPTER_DIR = os.getenv("STT_ADAPTER_DIR", "outputs/run1/best")
+LORA_DIR = Path("outputs") / "lora"
+DATA_DIR = Path("data") / "uploaded"
+TRAIN_DIR = Path("outputs") / "train_runs"
+
+for _dir in (LORA_DIR, DATA_DIR, TRAIN_DIR):
+    _dir.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HOME", str(Path(".hf")))
+os.environ.setdefault("HF_DATASETS_CACHE", str(Path(".hf") / "datasets"))
+os.environ.setdefault("TORCH_HOME", str(Path(".torch")))
+Path(os.environ["HF_HOME"]).mkdir(parents=True, exist_ok=True)
+Path(os.environ["HF_DATASETS_CACHE"]).mkdir(parents=True, exist_ok=True)
+Path(os.environ["TORCH_HOME"]).mkdir(parents=True, exist_ok=True)
 
 
 def get_service(adapter_dir: str, config_path: str, device: Optional[str]) -> STTService:
-    global SERVICE
-    if SERVICE is None:
-        SERVICE = STTService(config_path, adapter_dir, device_str=device)
-    return SERVICE
+    key = adapter_dir or "__base__"
+    if key not in SERVICE_CACHE:
+        SERVICE_CACHE[key] = STTService(config_path, adapter_dir or None, device_str=device)
+    return SERVICE_CACHE[key]
+
+
+@app.exception_handler(Exception)
+async def all_exception_handler(request: Request, exc: Exception):
+    return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.exception_handler(Exception)
@@ -175,7 +204,7 @@ def index(request: Request):
 @app.post("/api/transcribe")
 async def api_transcribe(
     audio: UploadFile = File(...),
-    adapter_dir: str = Form(...),
+    adapter_dir: Optional[str] = Form(None),
     config_path: str = Form(DEFAULT_CONFIG_PATH),
     device: Optional[str] = Form(None),  # "cpu" or "cuda"
     language: Optional[str] = Form(None),
@@ -211,3 +240,293 @@ async def api_download_model(model_id: str = Form(...)):
         return JSONResponse({"status": "ok", "model_id": model_id})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+def _list_lora_adapters() -> List[Dict[str, str]]:
+    adapters = []
+    for path in LORA_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        marker = path / "adapter_config.json"
+        if marker.exists():
+            adapters.append({"name": path.name, "path": path.as_posix()})
+    adapters.sort(key=lambda x: x["name"])
+    return adapters
+
+
+@app.get("/api/lora/list")
+async def api_lora_list():
+    return JSONResponse({"lora": _list_lora_adapters()})
+
+
+def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.infolist():
+            extracted_path = dest_dir / member.filename
+            if not extracted_path.resolve().is_relative_to(dest_dir.resolve()):
+                raise ValueError(f"Unsafe zip path: {member.filename}")
+        zf.extractall(dest_dir)
+
+
+def _read_manifest_csv(manifest_path: Path, extracted_dir: Path) -> Tuple[List[Dict[str, str]], str, str]:
+    rows: List[Dict[str, str]] = []
+    audio_col = "path"
+    text_col = "transcript"
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = {fn.lower(): fn for fn in reader.fieldnames or []}
+        if "audio_path" in fieldnames:
+            audio_col = fieldnames["audio_path"]
+        elif "path" in fieldnames:
+            audio_col = fieldnames["path"]
+        if "text" in fieldnames:
+            text_col = fieldnames["text"]
+        elif "transcript" in fieldnames:
+            text_col = fieldnames["transcript"]
+
+        for row in reader:
+            audio_rel = Path(row.get(audio_col, "")).expanduser()
+            candidate = (extracted_dir / audio_rel).resolve() if not audio_rel.is_absolute() else audio_rel
+            if not candidate.exists():
+                continue
+            if not candidate.resolve().is_relative_to(extracted_dir.resolve()):
+                continue
+            text_val = row.get(text_col, "") or ""
+            rows.append(
+                {
+                    "path": candidate.resolve().relative_to(extracted_dir.resolve()).as_posix(),
+                    "transcript": text_val.strip(),
+                }
+            )
+    return rows, "path", "transcript"
+
+
+def _build_manifest_from_pairs(extracted_dir: Path) -> List[Dict[str, str]]:
+    exts = {".wav", ".mp3", ".m4a", ".webm"}
+    rows: List[Dict[str, str]] = []
+    for audio_file in extracted_dir.rglob("*"):
+        if audio_file.suffix.lower() not in exts or not audio_file.is_file():
+            continue
+        txt_path = audio_file.with_suffix(".txt")
+        if not txt_path.exists():
+            continue
+        with open(txt_path, "r", encoding="utf-8") as tf:
+            transcript = tf.read().strip()
+        rows.append(
+            {
+                "path": audio_file.resolve().relative_to(extracted_dir.resolve()).as_posix(),
+                "transcript": transcript,
+            }
+        )
+    return rows
+
+
+def _prepare_manifest(extracted_dir: Path) -> Tuple[Path, int, str, str]:
+    manifest_path = extracted_dir / "manifest.csv"
+    rows: List[Dict[str, str]] = []
+    audio_col = "path"
+    text_col = "transcript"
+
+    if manifest_path.exists():
+        rows, audio_col, text_col = _read_manifest_csv(manifest_path, extracted_dir)
+    else:
+        rows = _build_manifest_from_pairs(extracted_dir)
+
+    if not rows:
+        raise ValueError("No audio/text pairs found in dataset.")
+
+    with open(manifest_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["path", "transcript"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return manifest_path, len(rows), audio_col, text_col
+
+
+@app.post("/api/lora/upload_zip")
+async def api_lora_upload_zip(dataset_name: str = Form(...), zipfile: UploadFile = File(...)):
+    name = dataset_name.strip()
+    if not name:
+        return JSONResponse({"error": "dataset_name is required"}, status_code=400)
+
+    target_dir = DATA_DIR / name
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    zip_path = target_dir / "dataset.zip"
+    with open(zip_path, "wb") as f:
+        f.write(await zipfile.read())
+
+    extracted_dir = target_dir / "extracted"
+    if extracted_dir.exists():
+        shutil.rmtree(extracted_dir)
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _safe_extract_zip(zip_path, extracted_dir)
+        manifest_path, n_pairs, audio_col, text_col = _prepare_manifest(extracted_dir)
+        return JSONResponse(
+            {
+                "status": "ok",
+                "dataset_dir": target_dir.as_posix(),
+                "manifest": manifest_path.as_posix(),
+                "n_pairs": n_pairs,
+                "audio_column": audio_col,
+                "text_column": text_col,
+            }
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+def _update_status(status_path: Path, data: Dict[str, Any]) -> None:
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(status_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _run_training_job(
+    base_model: str,
+    dataset_name: str,
+    run_name: str,
+    language: Optional[str],
+    epochs: int,
+    learning_rate: float,
+    batch_size: int,
+    status_path: Path,
+    log_path: Path,
+    manifest_path: Path,
+    audio_column: str,
+    text_column: str,
+    config_template_path: str,
+) -> None:
+    status = {"state": "queued", "run_name": run_name, "dataset": dataset_name}
+    _update_status(status_path, status)
+    try:
+        status.update({"state": "running"})
+        _update_status(status_path, status)
+
+        cfg = read_yaml(config_template_path)
+        cfg.setdefault("data", {})
+        cfg.setdefault("model", {})
+        cfg.setdefault("lora", {})
+        cfg.setdefault("train", {})
+        cfg["output_dir"] = str(TRAIN_DIR / run_name)
+        cfg["data"] = {
+            "manifest_csv": manifest_path.as_posix(),
+            "audio_column": audio_column,
+            "text_column": text_column,
+            "val_split": cfg.get("data", {}).get("val_split", 0.1),
+            "num_workers": cfg.get("data", {}).get("num_workers", 4),
+        }
+        cfg["model"]["base_model_name"] = base_model or "openai/whisper-small"
+        cfg["model"]["language"] = language or None
+        cfg["lora"]["enabled"] = True
+        cfg["train"]["num_train_epochs"] = epochs
+        cfg["train"]["learning_rate"] = learning_rate
+        cfg["train"]["batch_size"] = batch_size
+        run_dir = TRAIN_DIR / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = run_dir / "config.generated.yaml"
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+
+        env = os.environ.copy()
+        env["PATH"] = f"bin{os.pathsep}" + env.get("PATH", "")
+        env.setdefault("HF_HOME", str(Path(".hf")))
+        env.setdefault("HF_DATASETS_CACHE", str(Path(".hf") / "datasets"))
+        env.setdefault("TORCH_HOME", str(Path(".torch")))
+
+        with open(log_path, "w", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                ["python", "script/train.py", "--config", cfg_path.as_posix()],
+                stdout=log_file,
+                stderr=log_file,
+                cwd=Path("."),
+                env=env,
+            )
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"Training failed with code {proc.returncode}")
+
+        best_dir = (TRAIN_DIR / run_name / "best").resolve()
+        dest_dir = (LORA_DIR / run_name).resolve()
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        if best_dir.exists():
+            shutil.copytree(best_dir, dest_dir)
+
+        status.update({"state": "done", "adapter_dir": dest_dir.as_posix(), "log_path": log_path.as_posix()})
+        _update_status(status_path, status)
+    except Exception as e:
+        status.update({"state": "error", "error": str(e)})
+        _update_status(status_path, status)
+
+
+@app.post("/api/lora/train")
+async def api_lora_train(
+    background_tasks: BackgroundTasks,
+    base_model: str = Form("openai/whisper-small"),
+    dataset_name: str = Form(...),
+    run_name: str = Form(...),
+    language: Optional[str] = Form(None),
+    epochs: int = Form(3),
+    lr: float = Form(1e-4),
+    batch_size: int = Form(8),
+):
+    dataset_dir = DATA_DIR / dataset_name
+    extracted_dir = dataset_dir / "extracted"
+    manifest_path = extracted_dir / "manifest.csv"
+    if not manifest_path.exists():
+        return JSONResponse({"error": "Dataset not found or manifest missing."}, status_code=400)
+
+    status_path = TRAIN_DIR / run_name / "status.json"
+    log_path = TRAIN_DIR / run_name / "train.log"
+
+    _, _, audio_col, text_col = _prepare_manifest(extracted_dir)
+
+    background_tasks.add_task(
+        _run_training_job,
+        base_model,
+        dataset_name,
+        run_name,
+        language,
+        int(epochs),
+        float(lr),
+        int(batch_size),
+        status_path,
+        log_path,
+        manifest_path,
+        audio_col,
+        text_col,
+        DEFAULT_CONFIG_PATH,
+    )
+
+    return JSONResponse(
+        {
+            "status": "started",
+            "run_name": run_name,
+            "log_path": log_path.as_posix(),
+            "status_path": status_path.as_posix(),
+        }
+    )
+
+
+@app.get("/api/lora/status")
+async def api_lora_status(run_name: str, tail: int = 50):
+    run_dir = TRAIN_DIR / run_name
+    status_path = run_dir / "status.json"
+    log_path = run_dir / "train.log"
+    status_data: Dict[str, Any] = {}
+    if status_path.exists():
+        with open(status_path, "r", encoding="utf-8") as f:
+            status_data = json.load(f)
+    else:
+        status_data = {"state": "unknown", "run_name": run_name}
+
+    lines: List[str] = []
+    if log_path.exists():
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()[-tail:]
+
+    return JSONResponse({"status": status_data, "log_tail": lines})
