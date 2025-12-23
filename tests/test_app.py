@@ -2,6 +2,8 @@ import io
 import json
 import sys
 import types
+import wave
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -37,17 +39,34 @@ def clear_service():
 @pytest.fixture
 def dummy_service(monkeypatch):
     dummy = DummyService()
+    normalize_calls = []
 
     def fake_get_service(adapter_dir, config_path, device):
         _ = (adapter_dir, config_path, device)
         return dummy
 
-    def fake_loader(data: bytes, fmt=None):
-        _ = (data, fmt)
+    def make_wav_bytes():
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(np.zeros(1600, dtype=np.int16).tobytes())
+        return buf.getvalue()
+
+    def fake_normalize(upload_bytes: bytes, filename: str):
+        normalize_calls.append(filename)
+        _ = upload_bytes
+        return make_wav_bytes()
+
+    def fake_loader_bytes(data: bytes):
+        _ = data
         return np.zeros(16000, dtype=np.float32)
 
     monkeypatch.setattr("app.app.get_service", fake_get_service)
-    monkeypatch.setattr("app.app.load_wav_bytes_to_16k_mono", fake_loader)
+    monkeypatch.setattr("app.app.normalize_to_wav16k_mono", fake_normalize)
+    monkeypatch.setattr("app.app.load_wav_bytes_to_float32_mono_16k", fake_loader_bytes)
+    dummy.normalize_calls = normalize_calls
     return dummy
 
 
@@ -78,6 +97,47 @@ def test_api_transcribe_success(dummy_service):
     parsed = json.loads(resp.body.decode())
     assert parsed["text"] == "dummy text"
     assert "timestamp" in parsed
+
+
+def test_api_transcribe_converts_non_wav(dummy_service):
+    upload = UploadFile(filename="audio.webm", file=io.BytesIO(b"fakewebm"))
+    import asyncio
+
+    resp = asyncio.get_event_loop().run_until_complete(
+        api_transcribe(
+            audio=upload,
+            adapter_dir="adapter",
+            config_path="config.yaml",
+            device=None,
+            language=None,
+            beam_size=5,
+            temperature=0.0,
+        )
+    )
+    assert resp.status_code == 200
+    parsed = json.loads(resp.body.decode())
+    assert parsed["text"] == "dummy text"
+    assert "timestamp" in parsed
+    assert dummy_service.normalize_calls, "normalization should be invoked for non-wav uploads"
+
+
+def test_api_transcribe_rejects_non_upload():
+    import asyncio
+
+    resp = asyncio.get_event_loop().run_until_complete(
+        api_transcribe(
+            audio=Path("clip.wav"),
+            adapter_dir="adapter",
+            config_path="config.yaml",
+            device=None,
+            language=None,
+            beam_size=5,
+            temperature=0.0,
+        )
+    )
+    assert resp.status_code == 400
+    parsed = json.loads(resp.body.decode())
+    assert "Unsupported audio type" in parsed["error"]
 
 
 def test_get_service_singleton(monkeypatch):

@@ -34,11 +34,13 @@
       </div>
 
       <div class="row">
-        <button id="recordBtn">Record</button>
-        <button id="stopBtn" disabled>Stop</button>
-        <button id="transcribeBtn" disabled>Transcribe</button>
-        <button id="copyBtn" disabled>Copy</button>
-        <button id="saveBtn" disabled>Save transcript</button>
+        <button id="recordBtn" type="button">Record</button>
+        <button id="stopBtn" type="button" disabled>Stop</button>
+        <button id="uploadBtn" type="button">Upload sound file</button>
+        <button id="transcribeBtn" type="button" disabled>Transcribe</button>
+        <button id="copyBtn" type="button" disabled>Copy</button>
+        <button id="saveBtn" type="button" disabled>Save transcript</button>
+        <input id="uploadFile" type="file" accept="audio/*" style="display: none" />
       </div>
 
       <div class="row">
@@ -60,6 +62,6 @@
       </div>
     </div>
 
-    <script src="/static/main.js"></script>
+    <script src="/static/main.js" defer></script>
   </body>
 </html>
