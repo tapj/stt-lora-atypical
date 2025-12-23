@@ -46,20 +46,49 @@ def guess_audio_format(filename: Optional[str], content_type: Optional[str]) -> 
     return None
 
 
-def load_wav_file_to_mono_16k(path: Path) -> np.ndarray:
-    with wave.open(path, "rb") as wf:
-        if wf.getnchannels() != 1:
-            raise ValueError("Expected mono WAV input")
-        if wf.getframerate() != 16000:
-            raise ValueError("Expected 16 kHz WAV input")
-        if wf.getsampwidth() != 2:
-            raise ValueError("Expected 16-bit PCM WAV input")
-        frames = wf.readframes(wf.getnframes())
-    wav = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-    return wav
+def normalize_to_wav16k_mono(upload_bytes: bytes, filename: str) -> bytes:
+    """
+    Return WAV bytes (mono, 16 kHz, pcm_s16le) by invoking ffmpeg.
+    """
+    suffix = Path(filename or "").suffix.lower() or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
+        src.write(upload_bytes)
+        src_path = src.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+        dst_path = dst.name
+
+    env = os.environ.copy()
+    env["PATH"] = f"bin{os.pathsep}" + env.get("PATH", "")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        src_path,
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-acodec",
+        "pcm_s16le",
+        "-f",
+        "wav",
+        dst_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with open(dst_path, "rb") as f:
+            wav_bytes = f.read()
+        return wav_bytes
+    finally:
+        for p in (src_path, dst_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
-def load_wav_bytes_to_mono_16k(data: bytes) -> np.ndarray:
+def load_wav_bytes_to_float32_mono_16k(data: bytes) -> np.ndarray:
     with wave.open(io.BytesIO(data), "rb") as wf:
         if wf.getnchannels() != 1:
             raise ValueError("Expected mono WAV input")
@@ -150,56 +179,14 @@ async def api_transcribe(
     temperature: float = Form(0.0),
 ):
     upload = audio
-    input_path: Optional[Path] = None
-    output_path: Optional[Path] = None
     try:
         if not hasattr(upload, "read"):
             raise TypeError(f"Unsupported audio type: {type(upload)}")
 
         audio_bytes = await upload.read()
         filename = upload.filename or "audio.webm"
-        suffix = Path(filename).suffix.lower()
-
-        env = os.environ.copy()
-        env["PATH"] = f"bin{os.pathsep}" + env.get("PATH", "")
-
-        if suffix == ".wav":
-            audio_16k = load_wav_bytes_to_mono_16k(audio_bytes)
-        else:
-            if not suffix:
-                suffix = ".webm"
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
-                src.write(audio_bytes)
-                input_path = Path(src.name)
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
-                output_path = Path(dst.name)
-
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(input_path),
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-f",
-                "wav",
-                "-acodec",
-                "pcm_s16le",
-                str(output_path),
-            ]
-            try:
-                subprocess.run(ffmpeg_cmd, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            except FileNotFoundError as exc:
-                raise FileNotFoundError("ffmpeg not found in PATH; install a static build into ./bin") from exc
-            except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else ""
-                raise RuntimeError(f"ffmpeg failed: {stderr.strip()}") from exc
-
-            audio_16k = load_wav_file_to_mono_16k(output_path)
+        wav_bytes = normalize_to_wav16k_mono(audio_bytes, filename)
+        audio_16k = load_wav_bytes_to_float32_mono_16k(wav_bytes)
 
         svc = get_service(adapter_dir=adapter_dir, config_path=config_path, device=device)
         text = svc.transcribe(audio_16k, language=language, beam=beam_size, temperature=temperature)

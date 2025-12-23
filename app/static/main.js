@@ -6,7 +6,7 @@ window.addEventListener("DOMContentLoaded", () => {
   const recordBtn = document.getElementById("recordBtn");
   const stopBtn = document.getElementById("stopBtn");
   const uploadBtn = document.getElementById("uploadBtn");
-  const wavFile = document.getElementById("wavFile");
+  const uploadFile = document.getElementById("uploadFile");
   const transcribeBtn = document.getElementById("transcribeBtn");
   const copyBtn = document.getElementById("copyBtn");
   const saveBtn = document.getElementById("saveBtn");
@@ -87,17 +87,17 @@ window.addEventListener("DOMContentLoaded", () => {
   };
 
   uploadBtn.onclick = () => {
-    wavFile.value = "";
-    wavFile.click();
+    uploadFile.value = "";
+    uploadFile.click();
   };
 
-  wavFile.onchange = async () => {
-    const f = wavFile.files && wavFile.files[0];
+  uploadFile.onchange = async () => {
+    const f = uploadFile.files && uploadFile.files[0];
     if (!f) return;
     copyBtn.disabled = true;
     saveBtn.disabled = true;
     await transcribeFile(f, "Uploading...");
-    wavFile.value = "";
+    uploadFile.value = "";
   };
 
   transcribeBtn.onclick = async () => {

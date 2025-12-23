@@ -39,13 +39,28 @@ def clear_service():
 @pytest.fixture
 def dummy_service(monkeypatch):
     dummy = DummyService()
+    normalize_calls = []
 
     def fake_get_service(adapter_dir, config_path, device):
         _ = (adapter_dir, config_path, device)
         return dummy
 
-    def fake_loader(path: Path):
-        _ = path
+    def make_wav_bytes():
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(np.zeros(1600, dtype=np.int16).tobytes())
+        return buf.getvalue()
+
+    def fake_normalize(upload_bytes: bytes, filename: str):
+        normalize_calls.append(filename)
+        _ = upload_bytes
+        return make_wav_bytes()
+
+    def fake_loader_bytes(data: bytes):
+        _ = data
         return np.zeros(16000, dtype=np.float32)
 
     def fake_loader_bytes(data: bytes):
@@ -66,10 +81,9 @@ def dummy_service(monkeypatch):
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("app.app.get_service", fake_get_service)
-    monkeypatch.setattr("app.app.load_wav_file_to_mono_16k", fake_loader)
-    monkeypatch.setattr("app.app.load_wav_bytes_to_mono_16k", fake_loader_bytes)
-    monkeypatch.setattr("app.app.subprocess.run", fake_run)
-    dummy.ffmpeg_calls = ffmpeg_calls
+    monkeypatch.setattr("app.app.normalize_to_wav16k_mono", fake_normalize)
+    monkeypatch.setattr("app.app.load_wav_bytes_to_float32_mono_16k", fake_loader_bytes)
+    dummy.normalize_calls = normalize_calls
     return dummy
 
 
@@ -121,7 +135,7 @@ def test_api_transcribe_converts_non_wav(dummy_service):
     parsed = json.loads(resp.body.decode())
     assert parsed["text"] == "dummy text"
     assert "timestamp" in parsed
-    assert dummy_service.ffmpeg_calls, "ffmpeg should be invoked for non-wav uploads"
+    assert dummy_service.normalize_calls, "normalization should be invoked for non-wav uploads"
 
 
 def test_api_transcribe_rejects_non_upload():
