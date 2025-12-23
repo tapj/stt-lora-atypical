@@ -15,6 +15,28 @@
       </div>
 
       <div class="row">
+        <label><input type="checkbox" id="enableLora" /> Activer LoRA</label>
+      </div>
+
+      <div id="loraPanel" style="display: none">
+        <div class="row">
+          <label>LoRA disponible</label>
+          <select id="loraSelect"></select>
+          <button id="refreshLoraBtn" type="button">Rafraîchir</button>
+        </div>
+        <div class="row">
+          <input type="file" id="zipFile" accept=".zip" style="display: none" />
+          <button id="uploadZipBtn" type="button">Uploader ZIP dataset</button>
+          <input type="text" id="datasetName" placeholder="dataset_name" />
+        </div>
+        <div class="row">
+          <input type="text" id="runName" placeholder="run_name" />
+          <button id="trainBtn" type="button">Lancer entraînement</button>
+        </div>
+        <pre id="trainLog"></pre>
+      </div>
+
+      <div class="row">
         <label>Device</label>
         <select id="device">
           <option value="">auto</option>
