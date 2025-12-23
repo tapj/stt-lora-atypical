@@ -2,6 +2,8 @@ window.addEventListener("DOMContentLoaded", () => {
   let mediaRecorder = null;
   let chunks = [];
   let lastTranscript = "";
+  let currentBlob = null;
+  let currentFile = null;
 
   const recordBtn = document.getElementById("recordBtn");
   const stopBtn = document.getElementById("stopBtn");
@@ -15,6 +17,13 @@ window.addEventListener("DOMContentLoaded", () => {
   const downloadModelBtn = document.getElementById("downloadModelBtn");
   const modelSelect = document.getElementById("modelSelect");
   const customModelInput = document.getElementById("customModel");
+
+  console.log("UI elements", { recordBtn, transcribeBtn, uploadBtn, uploadFile });
+
+  if (!recordBtn || !transcribeBtn || !uploadBtn || !uploadFile) {
+    console.error("Missing DOM elements. Check ids in index.html.");
+    return;
+  }
 
   function setStatus(s) {
     statusEl.textContent = s;
@@ -39,6 +48,7 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   async function transcribeFile(file, message) {
+    console.log("transcribe start", file && file.name);
     transcribeBtn.disabled = true;
     uploadBtn.disabled = true;
     setStatus(message);
@@ -67,7 +77,12 @@ window.addEventListener("DOMContentLoaded", () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(stream);
     mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-    mediaRecorder.onstop = () => setStatus("Recorded. Ready to transcribe.");
+    mediaRecorder.onstop = () => {
+      currentBlob = new Blob(chunks, { type: "audio/webm" });
+      currentFile = null;
+      setStatus("Recorded. Ready to transcribe.");
+      console.log("recording stopped", currentBlob);
+    };
 
     mediaRecorder.start();
     setStatus("Recording...");
@@ -87,6 +102,7 @@ window.addEventListener("DOMContentLoaded", () => {
   };
 
   uploadBtn.onclick = () => {
+    currentFile = null;
     uploadFile.value = "";
     uploadFile.click();
   };
@@ -94,30 +110,32 @@ window.addEventListener("DOMContentLoaded", () => {
   uploadFile.onchange = async () => {
     const f = uploadFile.files && uploadFile.files[0];
     if (!f) return;
+    currentFile = f;
+    currentBlob = null;
     copyBtn.disabled = true;
     saveBtn.disabled = true;
-    await transcribeFile(f, "Uploading...");
-    uploadFile.value = "";
+    setStatus(`Selected: ${f.name}`);
+    console.log("file selected", f.name);
   };
 
-  transcribeBtn.onclick = async () => {
-    if (!chunks.length) {
-      setStatus("Record something first.");
+  transcribeBtn.onclick = async (e) => {
+    e.preventDefault();
+    console.log("transcribe click");
+
+    let fileToSend = null;
+    if (currentFile) {
+      fileToSend = currentFile;
+    } else if (currentBlob) {
+      const mimeType = currentBlob.type || "audio/webm";
+      fileToSend = new File([currentBlob], "recording.webm", { type: mimeType });
+    }
+
+    if (!fileToSend) {
+      setStatus("No audio selected or recorded.");
       return;
     }
 
-    setStatus("Transcribing mic recording...");
-    transcribeBtn.disabled = true;
-
-    const source = chunks.length ? chunks[0] : null;
-    const mimeType = source && source.type ? source.type : "audio/webm";
-    const blob = new Blob(chunks, { type: mimeType || "application/octet-stream" });
-    const arrayBuffer = await blob.arrayBuffer();
-
-    const filename = source && source.name ? source.name : "audio.webm";
-    const file = new File([arrayBuffer], filename, { type: mimeType || "audio/webm" });
-
-    await transcribeFile(file, "Transcribing mic recording...");
+    await transcribeFile(fileToSend, "Transcribing...");
   };
 
   copyBtn.onclick = async () => {
