@@ -270,13 +270,32 @@ def main():
         m = compute_wer_cer(pred_texts, ref_texts)
         return m
 
-    trainer = Seq2SeqTrainer(
+    class WhisperSeq2SeqTrainer(Seq2SeqTrainer):
+        def training_step(self, model, inputs):
+            # Ensure Whisper never receives text-encoder keys
+            if isinstance(inputs, dict):
+                inputs.pop("input_ids", None)
+                inputs.pop("attention_mask", None)
+                # sometimes present in seq2seq pipelines
+                inputs.pop("decoder_input_ids", None)
+                inputs.pop("decoder_attention_mask", None)
+            return super().training_step(model, inputs)
+
+        def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+            # Same stripping for eval/generation
+            if isinstance(inputs, dict):
+                inputs.pop("input_ids", None)
+                inputs.pop("attention_mask", None)
+                inputs.pop("decoder_input_ids", None)
+                inputs.pop("decoder_attention_mask", None)
+            return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
+
+    trainer = WhisperSeq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=ds["train"],
         eval_dataset=ds["validation"],
         data_collator=collator,
-        tokenizer=processor.tokenizer,  # keep HF happy; tokenizer is not used for audio features
         compute_metrics=compute_metrics,
         callbacks=[JsonlLoggerCallback(paths.logs_jsonl)],
     )
