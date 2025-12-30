@@ -23,4 +23,6 @@ class DataCollatorSpeechSeq2Seq:
         labels = labels_batch["input_ids"].masked_fill(labels_batch["attention_mask"].ne(1), -100)
 
         batch["labels"] = labels
+        
+        batch.pop("input_ids", None)
         return batch

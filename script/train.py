@@ -276,7 +276,7 @@ def main():
         train_dataset=ds["train"],
         eval_dataset=ds["validation"],
         data_collator=collator,
-        tokenizer=processor.feature_extractor,  # keep HF happy; tokenizer is not used for audio features
+        tokenizer=processor.tokenizer,  # keep HF happy; tokenizer is not used for audio features
         compute_metrics=compute_metrics,
         callbacks=[JsonlLoggerCallback(paths.logs_jsonl)],
     )
