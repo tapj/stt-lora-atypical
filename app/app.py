@@ -142,7 +142,7 @@ class STTService:
             gen_kwargs["prompt_ids"] = prompt_ids
 
         with torch.no_grad():
-            pred = self.model.generate(feats, **gen_kwargs)
+            pred = self.model.generate(input_features=feats, **gen_kwargs)
 
         text = self.processor.tokenizer.decode(pred[0], skip_special_tokens=True).strip()
         text = apply_corrections(text, self.corrections)
