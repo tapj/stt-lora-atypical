@@ -27,6 +27,9 @@ from src.whisper_lora import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _read_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -37,8 +40,9 @@ def _load_data(cfg: Dict[str, Any]) -> DatasetDict:
     if dcfg.get("manifest_csv"):
         manifest_path = Path(dcfg["manifest_csv"]).expanduser()
         if not manifest_path.is_absolute():
-            manifest_path = Path(cfg.get("_config_dir", ".")).resolve() / manifest_path
-        manifest_path = manifest_path.resolve()
+            manifest_path = (REPO_ROOT / manifest_path).resolve()
+        else:
+            manifest_path = manifest_path.resolve()
         data_dir = manifest_path.parent
 
         ds = load_dataset("csv", data_files=str(manifest_path), data_dir=str(data_dir))
@@ -163,7 +167,6 @@ def main():
 
     cfg_path = Path(args.config).expanduser()
     cfg = _read_yaml(cfg_path)
-    cfg["_config_dir"] = str(cfg_path.resolve().parent)
     set_seed(int(cfg["seed"]))
 
     paths = RunPaths.from_output_dir(cfg["output_dir"])
