@@ -243,14 +243,50 @@ async def api_download_model(model_id: str = Form(...)):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+def _is_lora_dir(p: Path) -> bool:
+    if not p.is_dir():
+        return False
+    if not (p / "adapter_config.json").exists():
+        return False
+    if (p / "adapter_model.safetensors").exists():
+        return True
+    if (p / "adapter_model.bin").exists():
+        return True
+    return False
+
+
 def _list_lora_adapters() -> List[Dict[str, str]]:
-    adapters = []
-    for path in LORA_DIR.iterdir():
-        if not path.is_dir():
+    adapters: List[Dict[str, str]] = []
+
+    roots = [LORA_DIR, REPO_ROOT / "outputs"]
+
+    seen = set()
+
+    for root in roots:
+        if not root.exists():
             continue
-        marker = path / "adapter_config.json"
-        if marker.exists():
-            adapters.append({"name": path.name, "path": path.as_posix()})
+
+        for p in root.iterdir():
+            if _is_lora_dir(p):
+                key = str(p.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    adapters.append({"name": p.name, "path": key})
+
+        for p in root.glob("*/best"):
+            if _is_lora_dir(p):
+                key = str(p.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    adapters.append({"name": p.parent.name, "path": key})
+
+        for p in root.glob("train_runs/*/best"):
+            if _is_lora_dir(p):
+                key = str(p.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    adapters.append({"name": p.parent.name, "path": key})
+
     adapters.sort(key=lambda x: x["name"])
     return adapters
 
