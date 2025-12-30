@@ -142,7 +142,7 @@ class STTService:
             gen_kwargs["prompt_ids"] = prompt_ids
 
         with torch.no_grad():
-            pred = self.model.generate(feats, **gen_kwargs)
+            pred = self.model.generate(input_features=feats, **gen_kwargs)
 
         text = self.processor.tokenizer.decode(pred[0], skip_special_tokens=True).strip()
         text = apply_corrections(text, self.corrections)
@@ -163,9 +163,9 @@ SERVICE_CACHE: Dict[str, STTService] = {}
 load_dotenv()
 DEFAULT_CONFIG_PATH = os.getenv("STT_CONFIG_PATH", "config.yaml")
 DEFAULT_ADAPTER_DIR = os.getenv("STT_ADAPTER_DIR", "outputs/run1/best")
-LORA_DIR = Path("outputs") / "lora"
-DATA_DIR = Path("data") / "uploaded"
-TRAIN_DIR = Path("outputs") / "train_runs"
+LORA_DIR = (REPO_ROOT / "outputs" / "lora").resolve()
+DATA_DIR = (REPO_ROOT / "data" / "uploaded").resolve()
+TRAIN_DIR = (REPO_ROOT / "outputs" / "train_runs").resolve()
 
 for _dir in (LORA_DIR, DATA_DIR, TRAIN_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
@@ -243,14 +243,50 @@ async def api_download_model(model_id: str = Form(...)):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+def _is_lora_dir(p: Path) -> bool:
+    if not p.is_dir():
+        return False
+    if not (p / "adapter_config.json").exists():
+        return False
+    if (p / "adapter_model.safetensors").exists():
+        return True
+    if (p / "adapter_model.bin").exists():
+        return True
+    return False
+
+
 def _list_lora_adapters() -> List[Dict[str, str]]:
-    adapters = []
-    for path in LORA_DIR.iterdir():
-        if not path.is_dir():
+    adapters: List[Dict[str, str]] = []
+
+    roots = [LORA_DIR, REPO_ROOT / "outputs"]
+
+    seen = set()
+
+    for root in roots:
+        if not root.exists():
             continue
-        marker = path / "adapter_config.json"
-        if marker.exists():
-            adapters.append({"name": path.name, "path": path.as_posix()})
+
+        for p in root.iterdir():
+            if _is_lora_dir(p):
+                key = str(p.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    adapters.append({"name": p.name, "path": key})
+
+        for p in root.glob("*/best"):
+            if _is_lora_dir(p):
+                key = str(p.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    adapters.append({"name": p.parent.name, "path": key})
+
+        for p in root.glob("train_runs/*/best"):
+            if _is_lora_dir(p):
+                key = str(p.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    adapters.append({"name": p.parent.name, "path": key})
+
     adapters.sort(key=lambda x: x["name"])
     return adapters
 
@@ -288,7 +324,7 @@ def _read_manifest_csv(manifest_path: Path, extracted_dir: Path) -> Tuple[List[D
 
         for row in reader:
             audio_rel = Path(row.get(audio_col, "")).expanduser()
-            candidate = (extracted_dir / audio_rel).resolve() if not audio_rel.is_absolute() else audio_rel
+            candidate = (extracted_dir / audio_rel).resolve() if not audio_rel.is_absolute() else audio_rel.resolve()
             if not candidate.exists():
                 continue
             if not candidate.resolve().is_relative_to(extracted_dir.resolve()):
@@ -324,7 +360,7 @@ def _build_manifest_from_pairs(extracted_dir: Path) -> List[Dict[str, str]]:
 
 
 def _prepare_manifest(extracted_dir: Path) -> Tuple[Path, int, str, str]:
-    manifest_path = extracted_dir / "manifest.csv"
+    manifest_path = (extracted_dir / "manifest.csv").resolve()
     rows: List[Dict[str, str]] = []
     audio_col = "path"
     text_col = "transcript"
@@ -351,14 +387,16 @@ async def api_lora_upload_zip(dataset_name: str = Form(...), zipfile: UploadFile
     if not name:
         return JSONResponse({"error": "dataset_name is required"}, status_code=400)
 
-    target_dir = DATA_DIR / name
+    target_dir = (DATA_DIR / name).resolve()
+    if not target_dir.is_relative_to(DATA_DIR):
+        return JSONResponse({"error": "Invalid dataset name"}, status_code=400)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     zip_path = target_dir / "dataset.zip"
     with open(zip_path, "wb") as f:
         f.write(await zipfile.read())
 
-    extracted_dir = target_dir / "extracted"
+    extracted_dir = (target_dir / "extracted").resolve()
     if extracted_dir.exists():
         shutil.rmtree(extracted_dir)
     extracted_dir.mkdir(parents=True, exist_ok=True)
@@ -416,20 +454,33 @@ def _run_training_job(
         cfg.setdefault("model", {})
         cfg.setdefault("lora", {})
         cfg.setdefault("train", {})
-        cfg["output_dir"] = str(TRAIN_DIR / run_name)
+
+        output_dir = TRAIN_DIR / run_name
+        cfg["output_dir"] = str(output_dir)
+
         cfg["data"] = {
             "manifest_csv": manifest_path.as_posix(),
             "audio_column": audio_column,
             "text_column": text_column,
             "val_split": cfg.get("data", {}).get("val_split", 0.1),
             "num_workers": cfg.get("data", {}).get("num_workers", 4),
+            "max_audio_seconds": cfg.get("data", {}).get("max_audio_seconds", 20),
         }
         cfg["model"]["base_model_name"] = base_model or "openai/whisper-small"
         cfg["model"]["language"] = language or None
         cfg["lora"]["enabled"] = True
         cfg["train"]["num_train_epochs"] = epochs
         cfg["train"]["learning_rate"] = learning_rate
-        cfg["train"]["batch_size"] = batch_size
+
+        if not torch.cuda.is_available():
+            cfg["train"]["mixed_precision"] = "no"
+            cfg["train"]["batch_size"] = max(1, min(int(batch_size), 2))
+            cfg["train"]["gradient_accumulation_steps"] = 1
+        else:
+            cfg["train"]["batch_size"] = batch_size
+            grad_accum = cfg["train"].get("gradient_accumulation_steps")
+            cfg["train"]["gradient_accumulation_steps"] = grad_accum if grad_accum else 1
+
         run_dir = TRAIN_DIR / run_name
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = run_dir / "config.generated.yaml"
@@ -480,7 +531,9 @@ async def api_lora_train(
     lr: float = Form(1e-4),
     batch_size: int = Form(8),
 ):
-    dataset_dir = DATA_DIR / dataset_name
+    dataset_dir = (DATA_DIR / dataset_name).resolve()
+    if not dataset_dir.is_relative_to(DATA_DIR):
+        return JSONResponse({"error": "Invalid dataset name"}, status_code=400)
     extracted_dir = dataset_dir / "extracted"
     manifest_path = extracted_dir / "manifest.csv"
     if not manifest_path.exists():
