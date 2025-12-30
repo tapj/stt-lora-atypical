@@ -1,6 +1,7 @@
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -26,6 +27,9 @@ from src.whisper_lora import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _read_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -34,7 +38,14 @@ def _read_yaml(path: str) -> Dict[str, Any]:
 def _load_data(cfg: Dict[str, Any]) -> DatasetDict:
     dcfg = cfg["data"]
     if dcfg.get("manifest_csv"):
-        ds = load_dataset("csv", data_files=dcfg["manifest_csv"])
+        manifest_path = Path(dcfg["manifest_csv"]).expanduser()
+        if not manifest_path.is_absolute():
+            manifest_path = (REPO_ROOT / manifest_path).resolve()
+        else:
+            manifest_path = manifest_path.resolve()
+        data_dir = manifest_path.parent
+
+        ds = load_dataset("csv", data_files=str(manifest_path), data_dir=str(data_dir))
         ds = ds["train"]
     elif dcfg.get("pairs_dir"):
         raise ValueError("pairs_dir is supported via data/prepare_manifest.py. Provide manifest_csv.")
@@ -114,7 +125,12 @@ def _prepare_features(cfg: Dict[str, Any], processor: WhisperProcessor):
         if arr.shape[0] > max_len:
             arr = arr[:max_len]
 
-        rng = np.random.RandomState(seed + (hash(batch.get(audio_col, "")) % 10_000))
+        audio_obj = batch.get(audio_col, "")
+        if isinstance(audio_obj, dict):
+            audio_id = audio_obj.get("path", "")
+        else:
+            audio_id = audio_obj
+        rng = np.random.RandomState(seed + (hash(str(audio_id)) % 10_000))
         arr = _optional_augment(arr, sr, cfg, rng)
         if normalize:
             arr = _normalize_loudness(arr)
@@ -154,7 +170,8 @@ def main():
     ap.add_argument("--config", type=str, default="config.yaml")
     args = ap.parse_args()
 
-    cfg = _read_yaml(args.config)
+    cfg_path = Path(args.config).expanduser()
+    cfg = _read_yaml(cfg_path)
     set_seed(int(cfg["seed"]))
 
     paths = RunPaths.from_output_dir(cfg["output_dir"])

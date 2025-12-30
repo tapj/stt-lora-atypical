@@ -152,6 +152,7 @@ class STTService:
 app = FastAPI()
 
 BASE_DIR = os.path.dirname(__file__)
+REPO_ROOT = Path(__file__).resolve().parent.parent
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
@@ -403,6 +404,10 @@ def _run_training_job(
     status = {"state": "queued", "run_name": run_name, "dataset": dataset_name}
     _update_status(status_path, status)
     try:
+        src_dir = REPO_ROOT / "src"
+        if not src_dir.exists():
+            raise RuntimeError(f"Expected repository source directory missing: {src_dir}")
+
         status.update({"state": "running"})
         _update_status(status_path, status)
 
@@ -436,13 +441,14 @@ def _run_training_job(
         env.setdefault("HF_HOME", str(Path(".hf")))
         env.setdefault("HF_DATASETS_CACHE", str(Path(".hf") / "datasets"))
         env.setdefault("TORCH_HOME", str(Path(".torch")))
+        env["PYTHONPATH"] = "."
 
         with open(log_path, "w", encoding="utf-8") as log_file:
             proc = subprocess.Popen(
-                ["python", "script/train.py", "--config", cfg_path.as_posix()],
+                ["python", "-m", "script.train", "--config", cfg_path.as_posix()],
                 stdout=log_file,
                 stderr=log_file,
-                cwd=Path("."),
+                cwd=REPO_ROOT,
                 env=env,
             )
             proc.wait()
