@@ -270,13 +270,19 @@ def main():
         m = compute_wer_cer(pred_texts, ref_texts)
         return m
 
-    trainer = Seq2SeqTrainer(
+    class WhisperSeq2SeqTrainer(Seq2SeqTrainer):
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            # Whisper expects audio features, not text encoder inputs
+            inputs.pop("input_ids", None)
+            inputs.pop("attention_mask", None)
+            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+
+    trainer = WhisperSeq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=ds["train"],
         eval_dataset=ds["validation"],
         data_collator=collator,
-        tokenizer=processor.tokenizer,  # keep HF happy; tokenizer is not used for audio features
         compute_metrics=compute_metrics,
         callbacks=[JsonlLoggerCallback(paths.logs_jsonl)],
     )
