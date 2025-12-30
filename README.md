@@ -83,7 +83,7 @@ Training
 Edit config.yaml then run:
 
 ```python
-python scripts/train.py --config config.yaml
+python -m script.train --config config.yaml
 ```
 
 Outputs:
