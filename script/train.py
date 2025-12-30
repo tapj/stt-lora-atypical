@@ -271,11 +271,24 @@ def main():
         return m
 
     class WhisperSeq2SeqTrainer(Seq2SeqTrainer):
-        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-            # Whisper expects audio features, not text encoder inputs
-            inputs.pop("input_ids", None)
-            inputs.pop("attention_mask", None)
-            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+        def training_step(self, model, inputs):
+            # Ensure Whisper never receives text-encoder keys
+            if isinstance(inputs, dict):
+                inputs.pop("input_ids", None)
+                inputs.pop("attention_mask", None)
+                # sometimes present in seq2seq pipelines
+                inputs.pop("decoder_input_ids", None)
+                inputs.pop("decoder_attention_mask", None)
+            return super().training_step(model, inputs)
+
+        def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+            # Same stripping for eval/generation
+            if isinstance(inputs, dict):
+                inputs.pop("input_ids", None)
+                inputs.pop("attention_mask", None)
+                inputs.pop("decoder_input_ids", None)
+                inputs.pop("decoder_attention_mask", None)
+            return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
 
     trainer = WhisperSeq2SeqTrainer(
         model=model,
