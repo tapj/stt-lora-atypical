@@ -1,6 +1,7 @@
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -34,7 +35,13 @@ def _read_yaml(path: str) -> Dict[str, Any]:
 def _load_data(cfg: Dict[str, Any]) -> DatasetDict:
     dcfg = cfg["data"]
     if dcfg.get("manifest_csv"):
-        ds = load_dataset("csv", data_files=dcfg["manifest_csv"])
+        manifest_path = Path(dcfg["manifest_csv"]).expanduser()
+        if not manifest_path.is_absolute():
+            manifest_path = Path(cfg.get("_config_dir", ".")).resolve() / manifest_path
+        manifest_path = manifest_path.resolve()
+        data_dir = manifest_path.parent
+
+        ds = load_dataset("csv", data_files=str(manifest_path), data_dir=str(data_dir))
         ds = ds["train"]
     elif dcfg.get("pairs_dir"):
         raise ValueError("pairs_dir is supported via data/prepare_manifest.py. Provide manifest_csv.")
@@ -154,7 +161,9 @@ def main():
     ap.add_argument("--config", type=str, default="config.yaml")
     args = ap.parse_args()
 
-    cfg = _read_yaml(args.config)
+    cfg_path = Path(args.config).expanduser()
+    cfg = _read_yaml(cfg_path)
+    cfg["_config_dir"] = str(cfg_path.resolve().parent)
     set_seed(int(cfg["seed"]))
 
     paths = RunPaths.from_output_dir(cfg["output_dir"])
