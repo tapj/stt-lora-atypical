@@ -416,20 +416,33 @@ def _run_training_job(
         cfg.setdefault("model", {})
         cfg.setdefault("lora", {})
         cfg.setdefault("train", {})
-        cfg["output_dir"] = str(TRAIN_DIR / run_name)
+
+        output_dir = TRAIN_DIR / run_name
+        cfg["output_dir"] = str(output_dir)
+
         cfg["data"] = {
             "manifest_csv": manifest_path.as_posix(),
             "audio_column": audio_column,
             "text_column": text_column,
             "val_split": cfg.get("data", {}).get("val_split", 0.1),
             "num_workers": cfg.get("data", {}).get("num_workers", 4),
+            "max_audio_seconds": cfg.get("data", {}).get("max_audio_seconds", 20),
         }
         cfg["model"]["base_model_name"] = base_model or "openai/whisper-small"
         cfg["model"]["language"] = language or None
         cfg["lora"]["enabled"] = True
         cfg["train"]["num_train_epochs"] = epochs
         cfg["train"]["learning_rate"] = learning_rate
-        cfg["train"]["batch_size"] = batch_size
+
+        if not torch.cuda.is_available():
+            cfg["train"]["mixed_precision"] = "no"
+            cfg["train"]["batch_size"] = max(1, min(int(batch_size), 2))
+            cfg["train"]["gradient_accumulation_steps"] = 1
+        else:
+            cfg["train"]["batch_size"] = batch_size
+            grad_accum = cfg["train"].get("gradient_accumulation_steps")
+            cfg["train"]["gradient_accumulation_steps"] = grad_accum if grad_accum else 1
+
         run_dir = TRAIN_DIR / run_name
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = run_dir / "config.generated.yaml"
