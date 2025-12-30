@@ -125,6 +125,12 @@ Open http://127.0.0.1:8000
 
 Buttons: Record, Stop, Transcribe, Copy, Save transcript.
 
+Training smoke test (online/offline)
+
+- Online: `pytest -k train_smoke -v`
+- Offline with local snapshot: `export STT_TEST_BASE_MODEL=/path/to/local/whisper-tiny && export TRANSFORMERS_OFFLINE=1 && pytest -k train_smoke -v`
+- Offline with pre-seeded cache: `export STT_TEST_HF_HOME=/path/to/preseeded/hf_cache && pytest -k train_smoke -v`
+
 Troubleshooting
 1) Web UI audio decode fails
 
