@@ -1,315 +1,132 @@
-import json
-import os
-from dataclasses import dataclass
+import argparse
+import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
-import numpy as np
-import torch
 import yaml
-from datasets import Audio, Dataset, DatasetDict, load_dataset
-from transformers import (
-    Seq2SeqTrainer,
-    Seq2SeqTrainingArguments,
-    TrainerCallback,
-    WhisperProcessor,
-)
 
-from src.collator import DataCollatorSpeechSeq2Seq
-from src.metrics import compute_wer_cer
-from src.utils import RunPaths, mixed_precision_flags, set_seed
-from src.whisper_lora import (
-    apply_lora,
-    load_base_model,
-    load_processor,
-    maybe_enable_gradient_checkpointing,
-    set_forced_decoder_ids,
-)
+from src.manifest_utils import resolve_manifest_paths
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _read_yaml(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
+def _read_yaml(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def _load_data(cfg: Dict[str, Any]) -> DatasetDict:
-    dcfg = cfg["data"]
-    if dcfg.get("manifest_csv"):
-        manifest_path = Path(dcfg["manifest_csv"]).expanduser()
-        if not manifest_path.is_absolute():
-            manifest_path = (REPO_ROOT / manifest_path).resolve()
-        else:
-            manifest_path = manifest_path.resolve()
-        data_dir = manifest_path.parent
-        ds = load_dataset("csv", data_files=str(manifest_path), data_dir=str(data_dir))
-        ds = ds["train"]
-
-    audio_col = dcfg.get("audio_column", "path")
-
-    # 🔧 FIX: convert relative audio paths to absolute paths BEFORE Audio decoding
-    def _make_abs_path(ex):
-        ex[audio_col] = str((data_dir / ex[audio_col]).resolve())
-        return ex
-
-    ds = ds.map(_make_abs_path, num_proc=1)
-
-    # Ensure audio is loaded and resampled to 16k
-    ds = ds.cast_column(audio_col, Audio(sampling_rate=16000))
-
-    #     ds = load_dataset("csv", data_files=str(manifest_path), data_dir=str(data_dir))
-    #     ds = ds["train"]
-    # elif dcfg.get("pairs_dir"):
-    #     raise ValueError("pairs_dir is supported via data/prepare_manifest.py. Provide manifest_csv.")
-    # else:
-    #     raise ValueError("Provide data.manifest_csv or data.pairs_dir.")
-    # 
-    # # Ensure audio is loaded and resampled to 16k
-    # audio_col = dcfg.get("audio_column", "path")
-    # ds = ds.cast_column(audio_col, Audio(sampling_rate=16000))
-
-    # Split train/val deterministically
-    val_split = float(dcfg.get("val_split", 0.1))
-    dd = ds.train_test_split(test_size=val_split, seed=int(cfg["seed"]))
-    return DatasetDict(train=dd["train"], validation=dd["test"])
+def _resolve_path(path_value: str, base_dir: Path) -> Path:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
 
 
-def _optional_augment(audio: np.ndarray, sr: int, cfg: Dict[str, Any], rng: np.random.RandomState) -> np.ndarray:
-    acfg = (cfg.get("data", {}).get("augment", {}) or {})
-    if not acfg.get("enabled", False):
-        return audio
-
-    out = audio.astype(np.float32)
-
-    # Conservative noise mix: gaussian hiss (no external files).
-    if rng.rand() < float(acfg.get("noise_mix_prob", 0.0)):
-        noise = rng.randn(out.shape[0]).astype(np.float32)
-        noise = noise / (np.std(noise) + 1e-6)
-        snr_db = 25.0  # mild
-        sig_power = np.mean(out**2) + 1e-12
-        noise_power = sig_power / (10 ** (snr_db / 10.0))
-        out = out + noise * np.sqrt(noise_power)
-
-    # Small time-stretch via resampling (approx). Avoid librosa dependency.
-    if rng.rand() < float(acfg.get("time_stretch_prob", 0.0)):
-        lo = float(acfg.get("time_stretch_min", 0.95))
-        hi = float(acfg.get("time_stretch_max", 1.05))
-        rate = float(rng.uniform(lo, hi))
-        new_len = int(round(out.shape[0] / rate))
-        idx = np.linspace(0, out.shape[0] - 1, new_len).astype(np.float32)
-        out = np.interp(idx, np.arange(out.shape[0], dtype=np.float32), out).astype(np.float32)
-
-    # Tiny pitch shift is risky for atypical speech. Here we do a very small spectral tilt approximation: skip true pitch shift.
-    # Keep the hook but no-op by default.
-    # If you want real pitch shift, add librosa and keep semitone range within [-1, 1].
-
-    return out
+def _require(section: Dict[str, Any], key: str, context: str) -> Any:
+    if key not in section or section.get(key) is None:
+        raise ValueError(f"Missing required config field: {context}.{key}")
+    return section.get(key)
 
 
-def _normalize_loudness(audio: np.ndarray) -> np.ndarray:
-    # Simple RMS normalization to a target RMS.
-    target_rms = 0.08
-    rms = float(np.sqrt(np.mean(audio**2) + 1e-12))
-    if rms < 1e-6:
-        return audio
-    gain = target_rms / rms
-    return (audio * gain).astype(np.float32)
+def _get_manifest_path(cfg: Dict[str, Any], cfg_path: Path) -> Path:
+    data = cfg.get("data", {}) or {}
+    manifest = data.get("manifest_csv") or data.get("manifest")
+    if not manifest:
+        raise ValueError("Provide data.manifest_csv (or data.manifest) in the YAML config.")
+    return _resolve_path(str(manifest), cfg_path.parent)
 
 
-def _prepare_features(cfg: Dict[str, Any], processor: WhisperProcessor):
-    dcfg = cfg["data"]
-    audio_col = dcfg.get("audio_column", "path")
-    text_col = dcfg.get("text_column", "transcript")
-    lang_col = dcfg.get("language_column", "language")
+def _build_command(cfg: Dict[str, Any], resolved_manifest: str) -> List[str]:
+    lora_cfg = cfg.get("lora", {}) or {}
+    if not lora_cfg.get("enabled", True):
+        raise ValueError("LoRA disabled but YAML workflow uses LoRA trainer; enable lora.enabled or implement non-LoRA path")
 
-    max_s = float(dcfg.get("max_audio_seconds", 20))
-    normalize = bool(dcfg.get("normalize_loudness", False))
+    data_cfg = cfg.get("data", {}) or {}
+    model_cfg = cfg.get("model", {}) or {}
+    train_cfg = cfg.get("train", {}) or {}
 
-    seed = int(cfg["seed"])
+    language = model_cfg.get("language")
+    language_val = language if language is not None else ""
+    task = model_cfg.get("task") or "transcribe"
+    max_steps = train_cfg.get("max_steps")
+    max_steps_val = max_steps if max_steps is not None else -1
 
-    def fn(batch: Dict[str, Any]) -> Dict[str, Any]:
-        audio = batch[audio_col]
-        arr = audio["array"]
-        sr = int(audio["sampling_rate"])
+    target_modules = lora_cfg.get("target_modules") or []
+    if not target_modules:
+        raise ValueError("lora.target_modules is required for LoRA training")
+    targets_csv = ",".join(target_modules)
 
-        # Truncate overly long audio to keep training stable.
-        max_len = int(sr * max_s)
-        if arr.shape[0] > max_len:
-            arr = arr[:max_len]
-
-        audio_obj = batch.get(audio_col, "")
-        if isinstance(audio_obj, dict):
-            audio_id = audio_obj.get("path", "")
-        else:
-            audio_id = audio_obj
-        rng = np.random.RandomState(seed + (hash(str(audio_id)) % 10_000))
-        arr = _optional_augment(arr, sr, cfg, rng)
-        if normalize:
-            arr = _normalize_loudness(arr)
-
-        inputs = processor.feature_extractor(arr, sampling_rate=sr)
-        batch["input_features"] = inputs["input_features"][0]
-
-        text = (batch.get(text_col) or "").strip()
-        # Optional: if per-row language exists, you can prepend hints. Keep simple.
-        batch_lang = (batch.get(lang_col) or "").strip() if lang_col in batch else ""
-        _ = batch_lang  # reserved for future use
-
-        labels = processor.tokenizer(text).input_ids
-        batch["labels"] = labels
-        return batch
-
-    return fn
-
-
-class JsonlLoggerCallback(TrainerCallback):
-    def __init__(self, path: str):
-        self.path = path
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if not logs:
-            return
-        rec = {"step": int(state.global_step), **logs}
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    cmd = [
+        "python",
+        "-u",
+        "src/train_lora_whisper.py",
+        "--manifest_csv",
+        resolved_manifest,
+        "--output_dir",
+        str(_require(cfg, "output_dir", "root")),
+        "--base_model",
+        str(_require(model_cfg, "base_model_name", "model")),
+        "--language",
+        str(language_val),
+        "--task",
+        str(task),
+        "--val_split",
+        str(_require(data_cfg, "val_split", "data")),
+        "--max_audio_seconds",
+        str(_require(data_cfg, "max_audio_seconds", "data")),
+        "--seed",
+        str(_require(cfg, "seed", "root")),
+        "--batch_size",
+        str(_require(train_cfg, "batch_size", "train")),
+        "--grad_accum",
+        str(_require(train_cfg, "gradient_accumulation_steps", "train")),
+        "--lr",
+        str(_require(train_cfg, "learning_rate", "train")),
+        "--warmup_steps",
+        str(_require(train_cfg, "warmup_steps", "train")),
+        "--epochs",
+        str(_require(train_cfg, "num_train_epochs", "train")),
+        "--max_steps",
+        str(max_steps_val),
+        "--eval_steps",
+        str(_require(train_cfg, "eval_steps", "train")),
+        "--save_steps",
+        str(_require(train_cfg, "save_steps", "train")),
+        "--logging_steps",
+        str(_require(train_cfg, "logging_steps", "train")),
+        "--save_total_limit",
+        str(_require(train_cfg, "save_total_limit", "train")),
+        "--lora_r",
+        str(_require(lora_cfg, "r", "lora")),
+        "--lora_alpha",
+        str(_require(lora_cfg, "alpha", "lora")),
+        "--lora_dropout",
+        str(_require(lora_cfg, "dropout", "lora")),
+        "--lora_targets",
+        targets_csv,
+    ]
+    return cmd
 
 
 def main():
-    import argparse
-
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, default="config.yaml")
     args = ap.parse_args()
 
     cfg_path = Path(args.config).expanduser()
     cfg = _read_yaml(cfg_path)
-    set_seed(int(cfg["seed"]))
 
-    paths = RunPaths.from_output_dir(cfg["output_dir"])
-    os.makedirs(paths.output_dir, exist_ok=True)
+    manifest_path = _get_manifest_path(cfg, cfg_path)
+    resolved_manifest = resolve_manifest_paths(str(manifest_path))
 
-    processor = load_processor(cfg["model"]["base_model_name"])
-    ds = _load_data(cfg)
+    output_dir = _resolve_path(str(cfg["output_dir"]), cfg_path.parent)
+    cfg = dict(cfg)
+    cfg["output_dir"] = str(output_dir)
 
-    prep = _prepare_features(cfg, processor)
-    num_workers = int(cfg["data"].get("num_workers", 4))
+    cmd = _build_command(cfg, resolved_manifest)
 
-    ds = ds.map(prep, remove_columns=ds["train"].column_names, num_proc=num_workers)
-
-    model = load_base_model(cfg["model"]["base_model_name"])
-    if cfg["train"].get("gradient_checkpointing", False):
-        maybe_enable_gradient_checkpointing(model, True)
-
-    # Force language/task if configured
-    set_forced_decoder_ids(
-        model,
-        processor,
-        language=cfg["model"].get("language"),
-        task=cfg["model"].get("task", "transcribe"),
-        enable=bool(cfg["model"].get("forced_decoder_ids", True)),
-    )
-
-    # LoRA only
-    if cfg["lora"].get("enabled", True):
-        model = apply_lora(
-            model,
-            r=int(cfg["lora"]["r"]),
-            alpha=int(cfg["lora"]["alpha"]),
-            dropout=float(cfg["lora"]["dropout"]),
-            target_modules=list(cfg["lora"]["target_modules"]),
-        )
-
-    fp16, bf16 = mixed_precision_flags(cfg["train"].get("mixed_precision", "no"))
-
-    training_args = Seq2SeqTrainingArguments(
-        output_dir=paths.output_dir,
-        per_device_train_batch_size=int(cfg["train"]["batch_size"]),
-        per_device_eval_batch_size=int(cfg["train"]["batch_size"]),
-        gradient_accumulation_steps=int(cfg["train"]["gradient_accumulation_steps"]),
-        learning_rate=float(cfg["train"]["learning_rate"]),
-        warmup_steps=int(cfg["train"]["warmup_steps"]),
-        num_train_epochs=float(cfg["train"]["num_train_epochs"]),
-        max_steps=int(cfg["train"]["max_steps"]) if cfg["train"].get("max_steps") else -1,
-        weight_decay=float(cfg["train"].get("weight_decay", 0.0)),
-        logging_steps=int(cfg["train"]["logging_steps"]),
-        evaluation_strategy="steps",
-        eval_steps=int(cfg["train"]["eval_steps"]),
-        save_strategy="steps",
-        save_steps=int(cfg["train"]["save_steps"]),
-        save_total_limit=int(cfg["train"]["save_total_limit"]),
-        predict_with_generate=True,
-        generation_max_length=int(cfg["model"].get("max_label_length", 256)),
-        fp16=fp16,
-        bf16=bf16,
-        dataloader_num_workers=num_workers,
-        max_grad_norm=float(cfg["train"].get("max_grad_norm", 1.0)),
-        report_to=[],
-        load_best_model_at_end=True,
-        metric_for_best_model="wer",
-        greater_is_better=False,
-        seed=int(cfg["seed"]),
-    )
-
-    collator = DataCollatorSpeechSeq2Seq(
-        processor=processor,
-        max_label_length=int(cfg["model"].get("max_label_length", 256)),
-    )
-
-    def compute_metrics(eval_pred):
-        pred_ids = eval_pred.predictions
-        label_ids = eval_pred.label_ids
-
-        # Replace -100 with pad token for decoding
-        label_ids = np.where(label_ids == -100, processor.tokenizer.pad_token_id, label_ids)
-
-        pred_texts = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-        ref_texts = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-        m = compute_wer_cer(pred_texts, ref_texts)
-        return m
-
-    class WhisperSeq2SeqTrainer(Seq2SeqTrainer):
-        def training_step(self, model, inputs):
-            # Ensure Whisper never receives text-encoder keys
-            if isinstance(inputs, dict):
-                inputs.pop("input_ids", None)
-                inputs.pop("attention_mask", None)
-                # sometimes present in seq2seq pipelines
-                inputs.pop("decoder_input_ids", None)
-                inputs.pop("decoder_attention_mask", None)
-            return super().training_step(model, inputs)
-
-        def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-            # Same stripping for eval/generation
-            if isinstance(inputs, dict):
-                inputs.pop("input_ids", None)
-                inputs.pop("attention_mask", None)
-                inputs.pop("decoder_input_ids", None)
-                inputs.pop("decoder_attention_mask", None)
-            return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
-
-    trainer = WhisperSeq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=ds["train"],
-        eval_dataset=ds["validation"],
-        data_collator=collator,
-        compute_metrics=compute_metrics,
-        callbacks=[JsonlLoggerCallback(paths.logs_jsonl)],
-    )
-
-    trainer.train()
-
-    # Save best adapter and processor
-    os.makedirs(paths.best_dir, exist_ok=True)
-    if hasattr(trainer.model, "save_pretrained"):
-        trainer.model.save_pretrained(paths.best_dir)
-    processor.save_pretrained(paths.best_dir)
-
-    print(f"Saved best checkpoint to {paths.best_dir}")
-    print(f"Metrics log: {paths.logs_jsonl}")
+    subprocess.run(cmd, check=True, cwd=REPO_ROOT)
 
 
 if __name__ == "__main__":
