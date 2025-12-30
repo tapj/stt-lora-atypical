@@ -44,17 +44,31 @@ def _load_data(cfg: Dict[str, Any]) -> DatasetDict:
         else:
             manifest_path = manifest_path.resolve()
         data_dir = manifest_path.parent
-
         ds = load_dataset("csv", data_files=str(manifest_path), data_dir=str(data_dir))
         ds = ds["train"]
-    elif dcfg.get("pairs_dir"):
-        raise ValueError("pairs_dir is supported via data/prepare_manifest.py. Provide manifest_csv.")
-    else:
-        raise ValueError("Provide data.manifest_csv or data.pairs_dir.")
+
+    audio_col = dcfg.get("audio_column", "path")
+
+    # 🔧 FIX: convert relative audio paths to absolute paths BEFORE Audio decoding
+    def _make_abs_path(ex):
+        ex[audio_col] = str((data_dir / ex[audio_col]).resolve())
+        return ex
+
+    ds = ds.map(_make_abs_path, num_proc=1)
 
     # Ensure audio is loaded and resampled to 16k
-    audio_col = dcfg.get("audio_column", "path")
     ds = ds.cast_column(audio_col, Audio(sampling_rate=16000))
+
+    #     ds = load_dataset("csv", data_files=str(manifest_path), data_dir=str(data_dir))
+    #     ds = ds["train"]
+    # elif dcfg.get("pairs_dir"):
+    #     raise ValueError("pairs_dir is supported via data/prepare_manifest.py. Provide manifest_csv.")
+    # else:
+    #     raise ValueError("Provide data.manifest_csv or data.pairs_dir.")
+    # 
+    # # Ensure audio is loaded and resampled to 16k
+    # audio_col = dcfg.get("audio_column", "path")
+    # ds = ds.cast_column(audio_col, Audio(sampling_rate=16000))
 
     # Split train/val deterministically
     val_split = float(dcfg.get("val_split", 0.1))
