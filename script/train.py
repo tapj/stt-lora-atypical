@@ -125,7 +125,12 @@ def _prepare_features(cfg: Dict[str, Any], processor: WhisperProcessor):
         if arr.shape[0] > max_len:
             arr = arr[:max_len]
 
-        rng = np.random.RandomState(seed + (hash(batch.get(audio_col, "")) % 10_000))
+        audio_obj = batch.get(audio_col, "")
+        if isinstance(audio_obj, dict):
+            audio_id = audio_obj.get("path", "")
+        else:
+            audio_id = audio_obj
+        rng = np.random.RandomState(seed + (hash(str(audio_id)) % 10_000))
         arr = _optional_augment(arr, sr, cfg, rng)
         if normalize:
             arr = _normalize_loudness(arr)
