@@ -11,6 +11,8 @@ pyyaml==6.0.2
 numpy==1.26.4
 
 sounddevice==0.4.7
+librosa
+soundfile
 
 fastapi==0.112.2
 uvicorn==0.30.6
